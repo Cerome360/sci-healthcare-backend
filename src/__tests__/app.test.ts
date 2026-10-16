@@ -84,6 +84,24 @@ describe('request ids', () => {
   });
 });
 
+describe('network header', () => {
+  it('includes X-Stellar-Network on every response', async () => {
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    expect(res.headers['x-stellar-network']).toBeDefined();
+    expect(['testnet', 'public', 'futurenet']).toContain(res.headers['x-stellar-network']);
+  });
+
+  it('includes network header on versioned paths', async () => {
+    const res = await app.inject({ method: 'GET', url: '/v1/health' });
+    expect(res.headers['x-stellar-network']).toBeDefined();
+  });
+
+  it('includes network header on error responses', async () => {
+    const res = await app.inject({ method: 'GET', url: '/does-not-exist' });
+    expect(res.headers['x-stellar-network']).toBeDefined();
+  });
+});
+
 describe('versioned paths', () => {
   it('serves every route under /v1 without a deprecation header', async () => {
     const res = await app.inject({ method: 'GET', url: '/v1/health' });

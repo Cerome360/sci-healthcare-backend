@@ -94,3 +94,92 @@ services:
 #   buildCommand: npm ci && ./scripts/use-postgres.sh && npx prisma generate && npm run build
 #   startCommand: npm run start:indexer
 #   envVars: ["...same contract ids and indexer settings as above..."]
+
+# ---------------------------------------------------------------------------
+# Two-network deployment: serve testnet and mainnet from one codebase.
+#
+# Each network gets its own service + database pair. The backend validates at
+# startup that NETWORK_PASSPHRASE matches STELLAR_NETWORK, so a misconfigured
+# service refuses to start rather than serving the wrong chain.
+#
+# Example: duplicate the service above with different names and env vars.
+#
+# - type: web
+#   name: sci-healthcare-testnet
+#   runtime: node
+#   plan: free
+#   region: oregon
+#   branch: main
+#   buildCommand: npm ci && ./scripts/use-postgres.sh && npx prisma generate && npm run build
+#   startCommand: npx prisma db push --skip-generate --accept-data-loss && npm start
+#   healthCheckPath: /health
+#   envVars:
+#     - key: DATABASE_URL
+#       fromDatabase:
+#         name: sci-healthcare-testnet-db
+#         property: connectionString
+#     - key: STELLAR_NETWORK
+#       value: testnet
+#     - key: SOROBAN_RPC_URL
+#       value: https://soroban-testnet.stellar.org
+#     - key: NETWORK_PASSPHRASE
+#       value: "Test SDF Network ; September 2015"
+#     - key: REGISTRY_CONTRACT_ID
+#       value: "<testnet registry contract id>"
+#     - key: VOUCHER_CONTRACT_ID
+#       value: "<testnet voucher contract id>"
+#     - key: RECEIPT_CONTRACT_ID
+#       value: "<testnet receipt contract id>"
+#     - key: USDC_CONTRACT_ID
+#       value: "<testnet USDC contract id>"
+#     - key: INDEXER_START_LEDGER
+#       value: "<ledger where testnet contracts were deployed>"
+#     - key: CORS_ORIGIN
+#       sync: false
+#
+# - type: database
+#   name: sci-healthcare-testnet-db
+#   databaseName: sci_healthcare_testnet
+#   user: sci
+#   plan: free
+#   region: oregon
+#
+# - type: web
+#   name: sci-healthcare-mainnet
+#   runtime: node
+#   plan: starter
+#   region: oregon
+#   branch: main
+#   buildCommand: npm ci && ./scripts/use-postgres.sh && npx prisma generate && npm run build
+#   startCommand: npx prisma db push --skip-generate --accept-data-loss && npm start
+#   healthCheckPath: /health
+#   envVars:
+#     - key: DATABASE_URL
+#       fromDatabase:
+#         name: sci-healthcare-mainnet-db
+#         property: connectionString
+#     - key: STELLAR_NETWORK
+#       value: public
+#     - key: SOROBAN_RPC_URL
+#       value: https://soroban-rpc.mainnet.stellar.org
+#     - key: NETWORK_PASSPHRASE
+#       value: "Public Global Stellar Network ; September 2015"
+#     - key: REGISTRY_CONTRACT_ID
+#       value: "<mainnet registry contract id>"
+#     - key: VOUCHER_CONTRACT_ID
+#       value: "<mainnet voucher contract id>"
+#     - key: RECEIPT_CONTRACT_ID
+#       value: "<mainnet receipt contract id>"
+#     - key: USDC_CONTRACT_ID
+#       value: "<mainnet USDC contract id>"
+#     - key: INDEXER_START_LEDGER
+#       value: "<ledger where mainnet contracts were deployed>"
+#     - key: CORS_ORIGIN
+#       sync: false
+#
+# - type: database
+#   name: sci-healthcare-mainnet-db
+#   databaseName: sci_healthcare_mainnet
+#   user: sci
+#   plan: standard-0
+#   region: oregon

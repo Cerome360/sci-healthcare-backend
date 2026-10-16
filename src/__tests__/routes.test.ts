@@ -336,6 +336,26 @@ describe('GET /health and /stats', () => {
   });
 });
 
+describe('GET /version', () => {
+  it('returns network and contract metadata', async () => {
+    const { status, body } = await get('/version');
+    expect(status).toBe(200);
+    expect(body.version).toBe('0.3.0');
+    expect(['testnet', 'public', 'futurenet']).toContain(body.network);
+    expect(body.contracts.registry).toMatch(/^[A-Z]{2}[A-Z0-9]{54}$/);
+    expect(body.contracts.voucher).toMatch(/^[A-Z]{2}[A-Z0-9]{54}$/);
+    expect(body.contracts.receipt).toMatch(/^[A-Z]{2}[A-Z0-9]{54}$/);
+  });
+
+  it('redacts credentials in RPC URL', async () => {
+    const { body } = await get('/version');
+    // If the URL contains @, it should be redacted
+    if (body.rpcUrl.includes('@')) {
+      expect(body.rpcUrl).toMatch(/:\/\/\*\*\*@/);
+    }
+  });
+});
+
 describe('GET /ready', () => {
   afterEach(() => vi.restoreAllMocks());
 

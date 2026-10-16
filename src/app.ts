@@ -97,9 +97,10 @@ export async function buildApp(
   });
 
   // Every response, including errors and 404s, carries the id that appears
-  // in the matching log line.
+  // in the matching log line, plus the configured Stellar network name.
   app.addHook('onSend', async (req, reply, payload) => {
     reply.header('x-request-id', req.id);
+    reply.header('x-stellar-network', env.STELLAR_NETWORK);
     return payload;
   });
 

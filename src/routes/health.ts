@@ -10,6 +10,32 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
   }, async () => ({ status: 'ok' }));
 
   /**
+   * Version and network metadata.
+   *
+   * Returns the configured network name, RPC URL (redacted), and contract ids
+   * so operators can verify which chain this instance is serving.
+   */
+  app.get('/version', {
+    schema: {
+      tags: ['health'],
+      summary: 'Version and network info',
+      description: 'Reports the configured Stellar network, RPC endpoint, and contract ids.',
+    },
+  }, async () => {
+    return {
+      version: '0.3.0',
+      network: env.STELLAR_NETWORK,
+      rpcUrl: env.SOROBAN_RPC_URL.replace(/:\/\/[^/]+@/, '://***@'),
+      contracts: {
+        registry: env.REGISTRY_CONTRACT_ID,
+        voucher: env.VOUCHER_CONTRACT_ID,
+        receipt: env.RECEIPT_CONTRACT_ID,
+        usdc: env.USDC_CONTRACT_ID ?? null,
+      },
+    };
+  });
+
+  /**
    * Readiness, including how far the indexer trails the chain. A large or
    * growing lag is the first symptom of nearly every problem this service
    * can have, so it is surfaced rather than buried in logs.
