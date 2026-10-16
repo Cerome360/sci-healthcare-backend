@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
+import { isPostgres } from '../lib/database.js';
 
 const listQuery = z.object({
   status: z.enum(['Pending', 'Active', 'Suspended']).optional(),
@@ -11,6 +12,12 @@ const listQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
+
+function nameContains(q: string): { contains: string; mode?: string } {
+  const filter: { contains: string; mode?: string } = { contains: q };
+  if (isPostgres) filter.mode = 'insensitive';
+  return filter;
+}
 
 export async function providerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/providers', async (req, reply) => {
@@ -23,7 +30,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     const where = {
       ...(status ? { status } : {}),
       ...(country ? { country } : {}),
-      ...(q ? { name: { contains: q } } : {}),
+      ...(q ? { name: nameContains(q) } : {}),
     };
 
     const [rows, total] = await Promise.all([
@@ -138,6 +145,20 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         ledger: c.ledger,
         changedAt: c.changedAt,
       })),
+    };
+  });
+
+  app.get('/countries', async () => {
+    const grouped = await prisma.provider.groupBy({
+      by: ['country'],
+      where: { status: 'Active' },
+      _count: { _all: true },
+    });
+
+    return {
+      countries: grouped
+        .map((g) => ({ code: g.country, clinicCount: g._count._all }))
+        .sort((a, b) => a.code.localeCompare(b.code)),
     };
   });
 }

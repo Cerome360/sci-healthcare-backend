@@ -26,6 +26,8 @@ const listQuery = z.object({
   provider: z.string().length(56).optional(),
   beneficiaryRef: z.string().refine(isValidRef, 'must be 64 hex characters').optional(),
   status: statusList.optional(),
+  sort: z.enum(['createdAt', 'expiresAt', 'amount']).default('createdAt'),
+  order: z.enum(['asc', 'desc']).default('desc'),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
@@ -42,7 +44,7 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
     }
-    const { funder, provider, beneficiaryRef, status, limit, offset } = parsed.data;
+    const { funder, provider, beneficiaryRef, status, sort, order, limit, offset } = parsed.data;
 
     // At least one selector is required. An unfiltered dump of every
     // voucher in the system is not a useful endpoint and invites scraping.
@@ -60,16 +62,23 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
       ...(status ? { status: { in: status } } : {}),
     };
 
-    const [rows, total] = await Promise.all([
-      prisma.voucher.findMany({
+    const total = await prisma.voucher.count({ where });
+
+    let rows: Row[];
+    if (sort === 'amount') {
+      const all = await prisma.voucher.findMany({ where, include: { provider: true } });
+      all.sort((a, b) => compareAmount(a, b, order));
+      rows = all.slice(offset, offset + limit);
+    } else {
+      const primary = sort === 'createdAt' ? { createdAt: order } : { expiresAt: order };
+      rows = await prisma.voucher.findMany({
         where,
         include: { provider: true },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [primary, { id: order }],
         take: limit,
         skip: offset,
-      }),
-      prisma.voucher.count({ where }),
-    ]);
+      });
+    }
 
     const labels = await serviceLabels(rows);
     return { total, limit, offset, vouchers: rows.map((v) => serialise(v, labels)) };
@@ -153,6 +162,19 @@ function parseWithin(within: string, now: number): number {
     default:
       return now;
   }
+}
+
+function compareAmount(
+  a: { id: string; amount: string },
+  b: { id: string; amount: string },
+  order: 'asc' | 'desc',
+): number {
+  const av = BigInt(a.amount);
+  const bv = BigInt(b.amount);
+  const sign = order === 'asc' ? 1 : -1;
+  if (av !== bv) return av < bv ? -sign : sign;
+  if (a.id === b.id) return 0;
+  return a.id < b.id ? -sign : sign;
 }
 
 type Row = {

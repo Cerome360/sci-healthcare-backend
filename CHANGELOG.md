@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- **GET /services**: Service catalogue across active clinics, grouped by code, with unique labels, clinic count and min/max/median price. Aggregates are computed with `BigInt`; the median of an even number of prices is the floor of the mean of the two middle values.
+- **GET /services/:code**: Active clinics offering one service code, cheapest first, each with `price` and `priceDisplay`.
+- **GET /countries**: Countries with at least one active clinic and their clinic counts, for building filters without paging every provider.
+- **GET /providers?q=**: Case-insensitive clinic name search, length-capped at 64 characters. Uses `mode: 'insensitive'` on Postgres; SQLite's `LIKE` is case-insensitive for ASCII.
+- **GET /vouchers sort options**: `?sort=createdAt|expiresAt|amount` and `?order=asc|desc` (defaults `createdAt`/`desc`, matching previous behaviour). `amount` is sorted numerically with `BigInt`, not lexicographically; ties fall back to the voucher id in the same direction.
 - **GET /receipts?provider=**: List receipts by clinic/provider. Beneficiary references omitted in this view.
 - **GET /receipts/:voucherId**: Fetch a single receipt by voucher ID for shareable receipt pages and verification. No beneficiary reference in response.
 - **GET /vouchers/due?within=72h**: Vouchers needing action soon (expiring, becoming refundable, or settleable) with funder or provider filter. Uses lifecycle logic from `src/lib/lifecycle.ts` so API and contracts agree.
