@@ -11,7 +11,8 @@ on:
     workflows: [CI]
     types: [completed]
   pull_request_target:
-    types: [labeled, unlabeled, ready_for_review, reopened]
+    # edited: re-check as soon as a contributor links an issue.
+    types: [edited, labeled, unlabeled, ready_for_review, reopened]
   schedule:
     # Catches approvals and anything an event missed.
     - cron: '17,47 * * * *'

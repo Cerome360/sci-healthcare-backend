@@ -26,7 +26,10 @@ const checks = (...xs) => xs.map(([name, status = 'completed', conclusion = 'suc
 function base(over = {}) {
   return {
     pr: pr(), ciRuns: ci(), checkRuns: checks(['lint'], ['test']),
-    files: ['src/app.ts'], reviews: [], writers: new Set(), patterns, ...over,
+    files: ['src/app.ts'], reviews: [], writers: new Set(), patterns,
+    author: { login: 'dev', isWriter: false, isBot: false },
+    linkedIssues: [{ number: 12, state: 'OPEN', assignees: ['dev'] }],
+    ...over,
   };
 }
 
@@ -110,4 +113,25 @@ test('glob patterns match whole paths only', () => {
   assert.ok(!pkg.test('packages/package.json.bak'));
   assert.ok(cargo.test('Cargo.toml'));
   assert.ok(cargo.test('contracts/voucher/Cargo.toml'));
+});
+
+test('a contributor pull request must link an issue', () => {
+  assert.equal(evaluate(base({ linkedIssues: [] })).reason, 'no-linked-issue');
+});
+
+test('the linked issue must be assigned to the author', () => {
+  const d = evaluate(base({ linkedIssues: [{ number: 5, state: 'OPEN', assignees: ['someone'] }] }));
+  assert.deepEqual([d.reason, d.detail], ['issue-not-assigned', ['#5']]);
+  const mixed = [
+    { number: 5, state: 'OPEN', assignees: ['someone'] },
+    { number: 6, state: 'OPEN', assignees: ['dev'] },
+  ];
+  assert.equal(evaluate(base({ linkedIssues: mixed })).action, 'merge');
+});
+
+test('maintainers and bots do not need a linked issue', () => {
+  const m = { login: 'm', isWriter: true, isBot: false };
+  const b = { login: 'b', isWriter: false, isBot: true };
+  assert.equal(evaluate(base({ linkedIssues: [], author: m })).action, 'merge');
+  assert.equal(evaluate(base({ linkedIssues: [], author: b })).action, 'merge');
 });

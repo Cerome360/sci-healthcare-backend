@@ -9,6 +9,11 @@
 // because a pull request's CI runs with the workflow files from that same
 // pull request: without this, editing ci.yml to skip the tests would be
 // enough to get merged.
+//
+// Drips Wave awards points only when the issue assigned to the contributor
+// is closed as completed. So a contributor's pull request must link at least
+// one issue assigned to them, and after merging the bot closes the linked
+// issues itself instead of relying on GitHub's closing keywords.
 
 const MARKER = '<!-- sci-automerge';
 const PASSING = new Set(['success', 'neutral', 'skipped']);
@@ -62,7 +67,7 @@ function approvedByWriter(reviews, headSha, writers) {
  * Returns { action: 'merge' | 'wait' | 'comment' | 'skip', reason, detail? }.
  * 'comment' means: do not merge, and tell the author why (once per commit).
  */
-function evaluate({ pr, ciRuns, checkRuns, files, reviews, writers, patterns }) {
+function evaluate({ pr, ciRuns, checkRuns, files, reviews, writers, patterns, author, linkedIssues = [] }) {
   if (pr.state !== 'open') return { action: 'skip', reason: 'not-open' };
   if (pr.draft) return { action: 'skip', reason: 'draft' };
   if (pr.labels.some((l) => l.name === 'do-not-merge')) return { action: 'skip', reason: 'do-not-merge' };
@@ -87,6 +92,16 @@ function evaluate({ pr, ciRuns, checkRuns, files, reviews, writers, patterns }) 
   }
   if (pr.mergeable_state === 'behind') return { action: 'comment', reason: 'behind' };
 
+  // Contributors earn Drips points through the issue, so it must be linked
+  // and assigned to them. Maintainers and bots are exempt.
+  if (author && !author.isWriter && !author.isBot) {
+    if (linkedIssues.length === 0) return { action: 'comment', reason: 'no-linked-issue' };
+    const mine = linkedIssues.filter((i) => i.assignees.includes(author.login));
+    if (mine.length === 0) {
+      return { action: 'comment', reason: 'issue-not-assigned', detail: linkedIssues.map((i) => `#${i.number}`) };
+    }
+  }
+
   const touched = sensitiveFiles(files, patterns);
   if (touched.length && !approvedByWriter(reviews, pr.head.sha, writers)) {
     return { action: 'comment', reason: 'needs-approval', detail: touched };
@@ -109,6 +124,10 @@ const MESSAGES = {
     'This pull request has merge conflicts with `main`. Please rebase or merge `main` into your branch; it will be merged automatically once CI passes again.',
   behind: () =>
     'All checks passed, but this branch is behind `main`, and `main` requires branches to be up to date. Please update your branch (merge or rebase `main`); it will be merged automatically once CI passes again.',
+  'no-linked-issue': () =>
+    'All checks passed, but this pull request is not linked to an issue. Drips Wave awards points only when the issue assigned to you is closed as completed, so it will not be merged until it is linked.\n\nAdd one line per issue to the description, for example:\n\n```\nCloses #123\n```\n\nThe bot checks again as soon as you edit the description.',
+  'issue-not-assigned': (issues) =>
+    `All checks passed, but the linked issue(s) ${issues.join(', ')} are not assigned to you. Drips Wave gives points to the person assigned to the issue, so apply for it on Drips Wave and get assigned first, or link the issue that is assigned to you. The bot checks again when you edit the description.`,
   'workflow-drift': () =>
     'All checks passed, but the CI workflows on `main` changed after this branch was created, and the bot is not allowed to merge a branch that would change workflow files. Please update your branch with `main` (merge or rebase); it will be merged automatically once CI passes again.',
   'needs-approval': (files) =>
@@ -140,6 +159,33 @@ async function alreadyCommented({ github, owner, repo, number, key }) {
   return comments.some((c) => (c.body || '').includes(key));
 }
 
+async function linkedIssuesOf({ github, owner, repo, number }) {
+  const q = `query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $number) {
+        closingIssuesReferences(first: 25) {
+          nodes { number state assignees(first: 20) { nodes { login } } }
+        }
+      }
+    }
+  }`;
+  const res = await github.graphql(q, { owner, repo, number });
+  return res.repository.pullRequest.closingIssuesReferences.nodes.map((n) => ({
+    number: n.number,
+    state: n.state,
+    assignees: n.assignees.nodes.map((a) => a.login),
+  }));
+}
+
+async function permissionOf({ github, owner, repo, username }) {
+  try {
+    const { data } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username });
+    return data.permission;
+  } catch {
+    return 'none';
+  }
+}
+
 async function handle({ github, context, core, pr, patterns }) {
   const { owner, repo } = context.repo;
   // Re-read: list results do not include mergeability.
@@ -150,7 +196,7 @@ async function handle({ github, context, core, pr, patterns }) {
   }
   const sha = full.head.sha;
 
-  const [ciRuns, checkRuns, filesRaw, reviews] = await Promise.all([
+  const [ciRuns, checkRuns, filesRaw, reviews, linkedIssues, authorPerm] = await Promise.all([
     github.rest.actions
       .listWorkflowRuns({ owner, repo, workflow_id: 'ci.yml', head_sha: sha, per_page: 20 })
       .then((r) => r.data.workflow_runs.filter((w) => w.event === 'pull_request')),
@@ -159,16 +205,23 @@ async function handle({ github, context, core, pr, patterns }) {
     ),
     paginate(github, github.rest.pulls.listFiles, { owner, repo, pull_number: full.number }),
     paginate(github, github.rest.pulls.listReviews, { owner, repo, pull_number: full.number }),
+    linkedIssuesOf({ github, owner, repo, number: full.number }),
+    permissionOf({ github, owner, repo, username: full.user.login }),
   ]);
+  const author = {
+    login: full.user.login,
+    isWriter: authorPerm === 'admin' || authorPerm === 'write',
+    isBot: full.user.type === 'Bot',
+  };
   const files = filesRaw.flatMap((f) => [f.filename, f.previous_filename].filter(Boolean));
 
   const writers = new Set();
   for (const login of new Set(reviews.filter((r) => r.state === 'APPROVED').map((r) => r.user.login))) {
-    const { data } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: login });
-    if (data.permission === 'admin' || data.permission === 'write') writers.add(login);
+    const perm = await permissionOf({ github, owner, repo, username: login });
+    if (perm === 'admin' || perm === 'write') writers.add(login);
   }
 
-  const decision = evaluate({ pr: full, ciRuns, checkRuns, files, reviews, writers, patterns });
+  const decision = evaluate({ pr: full, ciRuns, checkRuns, files, reviews, writers, patterns, author, linkedIssues });
   core.info(`#${full.number} @ ${sha.slice(0, 7)}: ${decision.action} (${decision.reason})`);
 
   if (decision.action === 'comment') {
@@ -206,9 +259,24 @@ ${key}`,
     return { action: 'wait', reason: 'merge-rejected' };
   }
 
+  // Close linked issues as completed ourselves: Drips awards points on that,
+  // and GitHub's closing keywords do not always fire for bot merges.
+  const closed = [];
+  for (const issue of linkedIssues) {
+    const { data } = await github.rest.issues.get({ owner, repo, issue_number: issue.number });
+    if (data.state === 'open') {
+      await github.rest.issues
+        .update({ owner, repo, issue_number: issue.number, state: 'closed', state_reason: 'completed' })
+        .catch((e) => core.warning(`could not close #${issue.number}: ${e.message}`));
+    }
+    closed.push(`#${issue.number}`);
+  }
+
   await github.rest.issues.createComment({
     owner, repo, issue_number: full.number,
-    body: `Merged automatically: every CI check passed on ${sha.slice(0, 7)}. Thank you for contributing!\n\n${MARKER} merged ${sha} -->`,
+    body: `Merged automatically: every CI check passed on ${sha.slice(0, 7)}.${
+      closed.length ? ` Closed ${closed.join(', ')} as completed.` : ''
+    } Thank you for contributing!\n\n${MARKER} merged ${sha} -->`,
   });
   if (full.head.repo && full.head.repo.full_name === `${owner}/${repo}` && full.head.ref !== full.base.ref) {
     await github.rest.git.deleteRef({ owner, repo, ref: `heads/${full.head.ref}` }).catch(() => {});
