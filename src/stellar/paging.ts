@@ -10,6 +10,12 @@ export type CollectedEvents = {
    * persist this as its cursor; nothing at or below it will be missed.
    */
   throughLedger: number;
+  /**
+   * True when the page budget was exhausted while the range was still
+   * producing full pages, so there is almost certainly more to fetch. The
+   * caller can use this to poll again immediately instead of sleeping.
+   */
+  hasMore: boolean;
 };
 
 export type CollectOptions = {
@@ -59,6 +65,7 @@ export async function collectEvents(
       return {
         events: events.filter((e) => e.ledger < lastLedger),
         throughLedger: lastLedger - 1,
+        hasMore: true,
       };
     }
     res = await source.getEvents({ cursor: res.cursor, filters, limit: pageSize });
@@ -66,5 +73,6 @@ export async function collectEvents(
     pages += 1;
   }
 
-  return { events, throughLedger: res.latestLedger };
+  // The loop only exits on a short page, so the range is drained.
+  return { events, throughLedger: res.latestLedger, hasMore: false };
 }

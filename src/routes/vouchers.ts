@@ -21,12 +21,17 @@ const STATUSES = [
 /** Amounts are i128 base units carried as decimal strings. */
 const BASE_UNITS = /^\d+$/;
 
+const statusList = z
+  .string()
+  .transform((s) => s.split(',').map((x) => x.trim()))
+  .pipe(z.array(z.enum(STATUSES)).min(1));
+
 const listQuery = z
   .object({
     funder: z.string().length(56).optional(),
     provider: z.string().length(56).optional(),
     beneficiaryRef: z.string().refine(isValidRef, 'must be 64 hex characters').optional(),
-    status: z.enum(STATUSES).optional(),
+    status: statusList.optional(),
     createdFrom: z.string().datetime({ offset: true }).optional(),
     createdTo: z.string().datetime({ offset: true }).optional(),
     minAmount: z.string().regex(BASE_UNITS, 'must be base units as an integer string').optional(),
@@ -42,6 +47,12 @@ const listQuery = z
     (q) => !q.minAmount || !q.maxAmount || BigInt(q.minAmount) <= BigInt(q.maxAmount),
     { message: 'must not exceed maxAmount', path: ['minAmount'] },
   );
+
+const dueQuery = z.object({
+  funder: z.string().length(56).optional(),
+  provider: z.string().length(56).optional(),
+  within: z.string().regex(/^\d+[hmd]$/, 'within must be like 72h, 30d, or 45m'),
+});
 
 export async function voucherRoutes(app: FastifyInstance): Promise<void> {
   app.get(
@@ -89,7 +100,7 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
         ...(funder ? { funder } : {}),
         ...(provider ? { providerAddress: provider } : {}),
         ...(beneficiaryRef ? { beneficiaryRef } : {}),
-        ...(status ? { status } : {}),
+        ...(status ? { status: { in: status } } : {}),
         ...(createdFrom || createdTo
           ? {
               createdAt: {
@@ -110,6 +121,54 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
 
       const labels = await serviceLabels(rows);
       return { total, limit, offset, vouchers: rows.map((v) => serialise(v, labels)) };
+    },
+  );
+
+  app.get(
+    '/vouchers/due',
+    { config: { rateLimit: LIST_ROUTE_RATE_LIMIT } },
+    async (req, reply) => {
+      const parsed = dueQuery.safeParse(req.query);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
+      }
+      const { funder, provider, within } = parsed.data;
+
+      if (!funder && !provider) {
+        return reply.code(400).send({
+          error: 'filter_required',
+          message: 'Provide at least one of: funder, provider',
+        });
+      }
+
+      const now = Date.now();
+      const deadline = parseWithin(within, now);
+
+      const where = {
+        ...(funder ? { funder } : {}),
+        ...(provider ? { providerAddress: provider } : {}),
+        status: { in: ['Funded', 'Claimed', 'Attested'] },
+      };
+
+      const rows = await prisma.voucher.findMany({
+        where,
+        include: { provider: true },
+        orderBy: { expiresAt: 'asc' },
+      });
+
+      const labels = await serviceLabels(rows);
+      const due = rows
+        .filter((v) => {
+          const timing = {
+            status: v.status,
+            expiresAt: v.expiresAt,
+            disputeDeadline: v.disputeDeadline,
+          };
+          return isRefundable(timing, deadline) || isSettleable(timing, deadline);
+        })
+        .map((v) => serialise(v, labels));
+
+      return { total: due.length, vouchers: due };
     },
   );
 
@@ -180,6 +239,23 @@ async function pageByAmount(
   });
   const byId = new Map(rows.map((r) => [r.id, r]));
   return { rows: ids.map((id) => byId.get(id)!), total: matching.length };
+}
+
+function parseWithin(within: string, now: number): number {
+  const match = within.match(/^(\d+)([hmd])$/);
+  if (!match) return now;
+  const value = Number(match[1]);
+  const unit = match[2];
+  switch (unit) {
+    case 'm':
+      return now + value * 60 * 1000;
+    case 'h':
+      return now + value * 60 * 60 * 1000;
+    case 'd':
+      return now + value * 24 * 60 * 60 * 1000;
+    default:
+      return now;
+  }
 }
 
 type Row = {

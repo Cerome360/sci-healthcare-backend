@@ -53,3 +53,18 @@ export const INDEXED_CONTRACTS = [
   env.VOUCHER_CONTRACT_ID,
   env.RECEIPT_CONTRACT_ID,
 ] as const;
+
+/**
+ * The short name for each configured contract, used to group per-contract
+ * history (governance, especially) for readers who think in roles rather
+ * than contract ids.
+ */
+export const CONTRACTS = [
+  { contract: 'registry', contractId: env.REGISTRY_CONTRACT_ID },
+  { contract: 'voucher', contractId: env.VOUCHER_CONTRACT_ID },
+  { contract: 'receipt', contractId: env.RECEIPT_CONTRACT_ID },
+] as const;
+
+export function contractName(contractId: string): string {
+  return CONTRACTS.find((c) => c.contractId === contractId)?.contract ?? 'unknown';
+}

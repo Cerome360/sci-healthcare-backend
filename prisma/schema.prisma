@@ -85,6 +85,53 @@ model Receipt {
   @@index([providerAddress])
 }
 
+/// Every admin proposal and handover observed on each contract.
+///
+/// Who controls a protocol's admin keys is due diligence, so the history is
+/// kept rather than only the current holder. Keyed by the on-chain event id
+/// so replay is idempotent.
+model GovernanceEvent {
+  id           String   @id // on-chain event id
+  contractId   String
+  contract     String // registry | voucher | receipt
+  kind         String // Proposed | Changed
+  admin        String // proposing admin (Proposed) or new admin (Changed)
+  pendingAdmin String? // nominee, for Proposed
+  ledger       Int
+  occurredAt   DateTime
+
+  @@index([contract, ledger])
+}
+
+/// Every observed status transition for a clinic.
+///
+/// Only the current status lives on `Provider`; this keeps when and how
+/// often a clinic was suspended, which is context a funder needs.
+model ProviderStatusChange {
+  id              String   @id // on-chain event id
+  providerAddress String
+  status          String // Pending | Active | Suspended
+  ledger          Int
+  changedAt       DateTime
+
+  @@index([providerAddress, ledger])
+}
+
+/// Every observed price change for a provider's service.
+///
+/// `Service` holds only the current price; this records how it changed.
+/// A label-only upsert does not write here.
+model ServicePriceChange {
+  id              String   @id // on-chain event id
+  providerAddress String
+  code            Int
+  price           String // i128 as decimal string
+  ledger          Int
+  changedAt       DateTime
+
+  @@index([providerAddress, code, ledger])
+}
+
 /// Single-row table tracking how far the indexer has replayed the ledger.
 model IndexerState {
   id          Int      @id @default(1)

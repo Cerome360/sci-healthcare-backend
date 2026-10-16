@@ -72,9 +72,12 @@ The indexer polls on an interval, applies each event to the read model, and only
 | `GET /stats` | Protocol counters for the dashboard |
 | `GET /providers` | Verified clinics, filterable by `status`, `country`, `q` |
 | `GET /providers/:address` | One clinic and its service catalogue |
+| `GET /providers/:address/history` | Every status transition for a clinic, oldest first |
+| `GET /providers/:address/services/:code/history` | Every observed price for a service, oldest first |
 | `GET /vouchers` | Vouchers by `funder`, `provider`, `beneficiaryRef`, `status`, a `createdFrom`/`createdTo` window or a `minAmount`/`maxAmount` band |
 | `GET /vouchers/:id` | One voucher, with its care receipt if settled |
 | `GET /receipts?beneficiaryRef=` | A patient's settled care history |
+| `GET /governance` | Current and pending admin per contract, plus the handover history |
 
 `GET /vouchers` **requires at least one filter**. An unfiltered dump of every voucher is not a useful endpoint and invites scraping.
 
@@ -84,7 +87,7 @@ The indexer polls on an interval, applies each event to the read model, and only
 
 ### Response behaviour
 
-List routes (`/vouchers`, `/providers`, `/receipts`) are limited to 30 requests
+List routes (`/vouchers`, `/vouchers/due`, `/providers`, `/receipts`) are limited to 30 requests
 per minute per client; other routes default to 120, while `/health` and `/ready`
 are exempt so a struggling service can always be probed. JSON above 1 KB is
 gzip-compressed when the client accepts it, and every response carries the

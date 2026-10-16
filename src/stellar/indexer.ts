@@ -1,7 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import { prisma } from '../db.js';
-import { env, INDEXED_CONTRACTS } from '../env.js';
+import { contractName, env, INDEXED_CONTRACTS } from '../env.js';
 import { server } from './client.js';
 import {
   asAddress,
@@ -31,10 +31,23 @@ import { collectEvents } from './paging.js';
  *   testnet). An indexer that falls further behind than the window cannot
  *   catch up, which is surfaced loudly rather than silently skipped.
  */
+/**
+ * How long to wait before the next poll.
+ *
+ * A cycle that exhausted its page budget still has events to read, so it
+ * runs again immediately rather than waiting out the poll interval. Once
+ * caught up, the normal interval resumes.
+ */
+export function nextPollDelay(hasMore: boolean, pollMs: number): number {
+  return hasMore ? 0 : pollMs;
+}
+
 export class Indexer {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private stopped = false;
+  /** Set by the last poll: true when a full page suggests a backlog. */
+  private hasMore = false;
 
   constructor(private readonly log: FastifyBaseLogger) {}
 
@@ -58,9 +71,10 @@ export class Indexer {
 
   private schedule(): void {
     if (this.stopped) return;
+    const delay = nextPollDelay(this.hasMore, env.INDEXER_POLL_MS);
     this.timer = setTimeout(() => {
       void this.tick().finally(() => this.schedule());
-    }, env.INDEXER_POLL_MS);
+    }, delay);
   }
 
   /** Exposed for tests and for a manual catch-up endpoint. */
@@ -71,6 +85,7 @@ export class Indexer {
       return await this.poll();
     } catch (err) {
       this.log.error({ err }, 'indexer poll failed');
+      this.hasMore = false;
       return 0;
     } finally {
       this.running = false;
@@ -78,6 +93,9 @@ export class Indexer {
   }
 
   private async poll(): Promise<number> {
+    // Reset first: any early return below means no backlog was detected.
+    this.hasMore = false;
+
     const state = await prisma.indexerState.findUniqueOrThrow({ where: { id: 1 } });
     const startLedger = state.lastLedger + 1;
 
@@ -92,17 +110,18 @@ export class Indexer {
     }
     if (startLedger > health.latestLedger) return 0;
 
-    const { events, throughLedger } = await collectEvents(server, {
+    const { events, throughLedger, hasMore } = await collectEvents(server, {
       startLedger,
       contractIds: INDEXED_CONTRACTS,
     });
+    this.hasMore = hasMore;
 
     let applied = 0;
     for (const raw of events) {
       const decoded = decodeEvent(raw as never);
       if (!decoded) continue;
       try {
-        await this.apply(decoded);
+        await this.applyEvent(decoded);
         applied += 1;
       } catch (err) {
         // One malformed event must not wedge the whole pipeline.
@@ -122,20 +141,32 @@ export class Indexer {
     return applied;
   }
 
-  private async apply(e: DecodedEvent): Promise<void> {
+  /**
+   * Projects one decoded event into the read model.
+   *
+   * Public so tests can drive handlers directly, with a decoded event, and
+   * without an RPC.
+   */
+  async applyEvent(e: DecodedEvent): Promise<void> {
     const d = e.fields;
     switch (e.name) {
       case 'provider_registered':
         await this.onProviderRegistered(d);
         break;
       case 'provider_status_changed':
-        await this.onProviderStatus(d);
+        await this.onProviderStatus(e);
         break;
       case 'service_upserted':
-        await this.onServiceUpserted(d);
+        await this.onServiceUpserted(e);
         break;
       case 'service_removed':
         await this.onServiceRemoved(d);
+        break;
+      case 'admin_proposed':
+        await this.onAdminProposed(e);
+        break;
+      case 'admin_changed':
+        await this.onAdminChanged(e);
         break;
       case 'voucher_created':
         await this.onVoucherCreated(d);
@@ -165,8 +196,8 @@ export class Indexer {
         await this.onReceiptMinted(d);
         break;
       default:
-        // Initialized, admin_proposed, admin_changed, minter_changed and
-        // token events are not part of the read model.
+        // Initialized, minter_changed and token events are not part of the
+        // read model.
         break;
     }
   }
@@ -186,22 +217,94 @@ export class Indexer {
     });
   }
 
-  private async onProviderStatus(d: Record<string, unknown>): Promise<void> {
-    const address = asAddress(d.provider);
-    const status = providerStatusName(d.status);
-    await prisma.provider.updateMany({ where: { address }, data: { status } });
+  private async onProviderStatus(e: DecodedEvent): Promise<void> {
+    const address = asAddress(e.fields.provider);
+    const status = providerStatusName(e.fields.status);
+    // The status update and its history row commit together, so a crash
+    // cannot leave the provider and its history disagreeing.
+    await prisma.$transaction([
+      prisma.provider.updateMany({ where: { address }, data: { status } }),
+      prisma.providerStatusChange.upsert({
+        where: { id: e.id },
+        create: {
+          id: e.id,
+          providerAddress: address,
+          status,
+          ledger: e.ledger,
+          changedAt: e.ledgerClosedAt,
+        },
+        update: {},
+      }),
+    ]);
   }
 
-  private async onServiceUpserted(d: Record<string, unknown>): Promise<void> {
+  private async onServiceUpserted(e: DecodedEvent): Promise<void> {
+    const d = e.fields;
     const providerAddress = asAddress(d.provider);
     const code = asNumber(d.code);
     const id = `${providerAddress}:${code}`;
     const price = asAmount(d.price);
     const label = String(d.label);
-    await prisma.service.upsert({
-      where: { id },
-      create: { id, code, label, price, active: true, providerAddress },
-      update: { label, price, active: true },
+
+    await prisma.$transaction(async (tx) => {
+      const existing = await tx.service.findUnique({
+        where: { id },
+        select: { price: true },
+      });
+      await tx.service.upsert({
+        where: { id },
+        create: { id, code, label, price, active: true, providerAddress },
+        update: { label, price, active: true },
+      });
+      // Only a price change is history; a relabelled service is not.
+      if (!existing || existing.price !== price) {
+        await tx.servicePriceChange.upsert({
+          where: { id: e.id },
+          create: {
+            id: e.id,
+            providerAddress,
+            code,
+            price,
+            ledger: e.ledger,
+            changedAt: e.ledgerClosedAt,
+          },
+          update: {},
+        });
+      }
+    });
+  }
+
+  private async onAdminProposed(e: DecodedEvent): Promise<void> {
+    await prisma.governanceEvent.upsert({
+      where: { id: e.id },
+      create: {
+        id: e.id,
+        contractId: e.contractId,
+        contract: contractName(e.contractId),
+        kind: 'Proposed',
+        admin: asAddress(e.fields.admin),
+        pendingAdmin: asAddress(e.fields.pending_admin),
+        ledger: e.ledger,
+        occurredAt: e.ledgerClosedAt,
+      },
+      update: {},
+    });
+  }
+
+  private async onAdminChanged(e: DecodedEvent): Promise<void> {
+    await prisma.governanceEvent.upsert({
+      where: { id: e.id },
+      create: {
+        id: e.id,
+        contractId: e.contractId,
+        contract: contractName(e.contractId),
+        kind: 'Changed',
+        admin: asAddress(e.fields.new_admin),
+        pendingAdmin: null,
+        ledger: e.ledger,
+        occurredAt: e.ledgerClosedAt,
+      },
+      update: {},
     });
   }
 

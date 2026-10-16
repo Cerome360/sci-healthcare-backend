@@ -116,5 +116,27 @@ describe('collectEvents', () => {
     });
     expect(out.events).toEqual([]);
     expect(out.throughLedger).toBe(LATEST);
+    expect(out.hasMore).toBe(false);
+  });
+
+  it('signals there is more to fetch when it stops at the page cap', async () => {
+    const { source } = fakeRpc([2, 6, 1]);
+    const out = await collectEvents(source, {
+      startLedger: 1,
+      contractIds: [CONTRACT],
+      pageSize: 3,
+      maxPages: 2,
+    });
+    expect(out.hasMore).toBe(true);
+  });
+
+  it('signals the range is drained on a short page', async () => {
+    const { source } = fakeRpc([3, 2]);
+    const out = await collectEvents(source, {
+      startLedger: 1,
+      contractIds: [CONTRACT],
+      pageSize: 10,
+    });
+    expect(out.hasMore).toBe(false);
   });
 });

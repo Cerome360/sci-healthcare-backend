@@ -117,6 +117,8 @@ describe('TOPIC_FIELDS', () => {
       'voucher_disputed',
       'voucher_settled',
       'voucher_refunded',
+      'admin_proposed',
+      'admin_changed',
       'receipt_minted',
     ]) {
       expect(TOPIC_FIELDS[name], `${name} has no topic mapping`).toBeDefined();

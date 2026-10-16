@@ -4,15 +4,21 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { buildApp } from '../app.js';
 import { prisma } from '../db.js';
+import { CONTRACTS } from '../env.js';
 import { CLAIM_GRACE_MS } from '../lib/lifecycle.js';
 import { LIST_ROUTE_RATE_LIMIT } from '../lib/rate-limits.js';
 
 const CLINIC = 'GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK';
 const PENDING_CLINIC = 'GBWBYKGC5OCRELVP5WHAKEMBSZMNUY3HOKVSYBQGLFNWWQHNH2SD53FZ';
 const FUNDER = 'GDUPJTF3PNSYJ73WWLNTYLG6UXN7HHBKCGFEEMDFMWKWGR3UMQT3JG45';
+const ADMIN = 'A'.repeat(56);
+const NEW_ADMIN = 'B'.repeat(56);
 const REF = '72676a6f4fff92b09ab1c6368672b05112062f683014d07c9518d4141d094745';
 const OTHER_REF = 'a'.repeat(64);
 const DAY = 24 * 60 * 60 * 1000;
+
+const REGISTRY = CONTRACTS.find((c) => c.contract === 'registry')!.contractId;
+const VOUCHER = CONTRACTS.find((c) => c.contract === 'voucher')!.contractId;
 
 let app: FastifyInstance;
 
@@ -136,6 +142,75 @@ async function seed() {
       },
     ],
   });
+
+  const at = (dayOffset: number) => new Date(now - dayOffset * DAY);
+  await prisma.governanceEvent.createMany({
+    data: [
+      {
+        id: 'gov-1',
+        contractId: REGISTRY,
+        contract: 'registry',
+        kind: 'Proposed',
+        admin: ADMIN,
+        pendingAdmin: NEW_ADMIN,
+        ledger: 10,
+        occurredAt: at(30),
+      },
+      {
+        id: 'gov-2',
+        contractId: REGISTRY,
+        contract: 'registry',
+        kind: 'Changed',
+        admin: NEW_ADMIN,
+        pendingAdmin: null,
+        ledger: 12,
+        occurredAt: at(29),
+      },
+      {
+        id: 'gov-3',
+        contractId: VOUCHER,
+        contract: 'voucher',
+        kind: 'Proposed',
+        admin: ADMIN,
+        pendingAdmin: NEW_ADMIN,
+        ledger: 14,
+        occurredAt: at(28),
+      },
+    ],
+  });
+  await prisma.providerStatusChange.createMany({
+    data: [
+      { id: 'st-1', providerAddress: CLINIC, status: 'Active', ledger: 10, changedAt: at(20) },
+      {
+        id: 'st-2',
+        providerAddress: CLINIC,
+        status: 'Suspended',
+        ledger: 12,
+        changedAt: at(15),
+      },
+      { id: 'st-3', providerAddress: CLINIC, status: 'Active', ledger: 14, changedAt: at(10) },
+    ],
+  });
+  await prisma.servicePriceChange.createMany({
+    data: [
+      {
+        id: 'sp-1',
+        providerAddress: CLINIC,
+        code: 101,
+        price: '30000000',
+        ledger: 10,
+        changedAt: at(20),
+      },
+      {
+        id: 'sp-2',
+        providerAddress: CLINIC,
+        code: 101,
+        price: '35000000',
+        ledger: 12,
+        changedAt: at(15),
+      },
+    ],
+  });
 }
 
 beforeAll(async () => {
@@ -152,6 +227,9 @@ beforeEach(async () => {
   await prisma.voucher.deleteMany();
   await prisma.service.deleteMany();
   await prisma.provider.deleteMany();
+  await prisma.governanceEvent.deleteMany();
+  await prisma.providerStatusChange.deleteMany();
+  await prisma.servicePriceChange.deleteMany();
   await seed();
 });
 
@@ -336,6 +414,207 @@ describe('GET /receipts', () => {
   it('requires a beneficiary reference', async () => {
     const { status } = await get('/receipts');
     expect(status).toBe(400);
+  });
+
+  it('lists receipts by provider, omitting beneficiaryRef', async () => {
+    const { body } = await get(`/receipts?provider=${CLINIC}`);
+    expect(body.total).toBe(2);
+    expect(body.totalSpend).toBe('40000000');
+    expect(body.receipts.map((r: { voucherId: string }) => r.voucherId)).toEqual(['9', '1']);
+    expect(body.receipts[0]).not.toHaveProperty('beneficiaryRef');
+    expect(body.receipts[0].serviceLabel).toBe('Malaria rapid test');
+  });
+
+  it('requires exactly one of beneficiaryRef or provider', async () => {
+    const { status, body } = await get('/receipts');
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_query');
+
+    const { status: s2, body: b2 } = await get(`/receipts?beneficiaryRef=${REF}&provider=${CLINIC}`);
+    expect(s2).toBe(400);
+    expect(b2.error).toBe('invalid_query');
+  });
+});
+
+describe('GET /receipts/:voucherId', () => {
+  it('returns a single receipt by voucherId without beneficiaryRef', async () => {
+    const { body } = await get('/receipts/1');
+    expect(body.voucherId).toBe('1');
+    expect(body.amount).toBe('30000000');
+    expect(body.amountDisplay).toBe('3.0000000');
+    expect(body.serviceLabel).toBe('Outpatient consult');
+    expect(body).not.toHaveProperty('beneficiaryRef');
+  });
+
+  it('404s for an unknown voucher', async () => {
+    const { status, body } = await get('/receipts/999');
+    expect(status).toBe(404);
+    expect(body.error).toBe('receipt_not_found');
+  });
+});
+
+describe('GET /vouchers', () => {
+  it('accepts comma-separated status list', async () => {
+    const { body } = await get(`/vouchers?funder=${FUNDER}&status=Claimed,Attested`);
+    expect(body.vouchers.map((v: { id: string }) => v.id).sort()).toEqual(['3', '4']);
+  });
+
+  it('rejects invalid status values', async () => {
+    const { status, body } = await get(`/vouchers?funder=${FUNDER}&status=Claimed,Invalid`);
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_query');
+  });
+});
+
+describe('GET /vouchers/due', () => {
+  it('requires funder or provider', async () => {
+    const { status, body } = await get('/vouchers/due?within=72h');
+    expect(status).toBe(400);
+    expect(body.error).toBe('filter_required');
+  });
+
+  it('rejects invalid within format', async () => {
+    const { status, body } = await get(`/vouchers/due?funder=${FUNDER}&within=invalid`);
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_query');
+  });
+
+  it('returns vouchers expiring, becoming refundable, or settleable within the window', async () => {
+    // Use a fixed clock by seeding with specific dates
+    const now = Date.now();
+    
+    // Add more vouchers for testing the due endpoint
+    await prisma.voucher.createMany({
+      data: [
+        // Funded, expires in 48h -> should be in 72h window (refundable at expiry)
+        {
+          funder: FUNDER,
+          beneficiaryRef: REF,
+          providerAddress: CLINIC,
+          id: 'due-1',
+          serviceCode: 101,
+          amount: '30000000',
+          status: 'Funded',
+          createdAt: new Date(now - 10 * DAY),
+          expiresAt: new Date(now + 48 * 60 * 60 * 1000),
+        },
+        // Claimed, expired 24h ago -> refundable in 6 days (outside 72h)
+        {
+          funder: FUNDER,
+          beneficiaryRef: REF,
+          providerAddress: CLINIC,
+          id: 'due-2',
+          serviceCode: 101,
+          amount: '30000000',
+          status: 'Claimed',
+          createdAt: new Date(now - 31 * DAY),
+          expiresAt: new Date(now - 24 * 60 * 60 * 1000),
+        },
+        // Attested, dispute deadline in 24h -> settleable in window
+        {
+          funder: FUNDER,
+          beneficiaryRef: REF,
+          providerAddress: CLINIC,
+          id: 'due-3',
+          serviceCode: 101,
+          amount: '30000000',
+          status: 'Attested',
+          createdAt: new Date(now - 5 * DAY),
+          expiresAt: new Date(now + 25 * DAY),
+          disputeDeadline: new Date(now + 24 * 60 * 60 * 1000),
+        },
+        // Funded, expires in 10 days -> outside 72h window
+        {
+          funder: FUNDER,
+          beneficiaryRef: REF,
+          providerAddress: CLINIC,
+          id: 'due-4',
+          serviceCode: 101,
+          amount: '30000000',
+          status: 'Funded',
+          createdAt: new Date(now - 10 * DAY),
+          expiresAt: new Date(now + 10 * DAY),
+        },
+      ],
+    });
+
+    // Use provider filter
+    const { body } = await get(`/vouchers/due?provider=${CLINIC}&within=72h`);
+    
+    // Existing seeded vouchers: id '2' (refundable now) and '4' (settleable now) are in window
+    // New vouchers: due-1 (expires in 48h) and due-3 (dispute deadline in 24h) are in window
+    // Total expected: 4
+    const ids = body.vouchers.map((v: { id: string }) => v.id).sort();
+    expect(ids).toContain('due-1');
+    expect(ids).toContain('due-3');
+    expect(ids).toContain('2');
+    expect(ids).toContain('4');
+    expect(ids).not.toContain('due-2');
+    expect(ids).not.toContain('due-4');
+    
+    expect(body.total).toBe(4);
+  });
+});
+
+describe('GET /governance', () => {
+  it('reports current and pending admin plus history for each contract', async () => {
+    const { status, body } = await get('/governance');
+    expect(status).toBe(200);
+
+    const byName = (name: string) =>
+      body.contracts.find((c: { contract: string }) => c.contract === name);
+
+    expect(byName('registry')).toMatchObject({ currentAdmin: NEW_ADMIN, pendingAdmin: null });
+    expect(byName('registry').history.map((h: { type: string }) => h.type)).toEqual([
+      'Proposed',
+      'Changed',
+    ]);
+
+    expect(byName('voucher')).toMatchObject({ currentAdmin: ADMIN, pendingAdmin: NEW_ADMIN });
+    expect(byName('voucher').history).toHaveLength(1);
+
+    expect(byName('receipt')).toMatchObject({
+      currentAdmin: null,
+      pendingAdmin: null,
+      history: [],
+    });
+  });
+});
+
+describe('GET /providers/:address/history', () => {
+  it('returns status transitions oldest first', async () => {
+    const { status, body } = await get(`/providers/${CLINIC}/history`);
+    expect(status).toBe(200);
+    expect(body.history.map((h: { status: string }) => h.status)).toEqual([
+      'Active',
+      'Suspended',
+      'Active',
+    ]);
+    expect(body.history.map((h: { ledger: number }) => h.ledger)).toEqual([10, 12, 14]);
+  });
+
+  it('404s an unknown provider', async () => {
+    const { status, body } = await get(`/providers/${FUNDER}/history`);
+    expect(status).toBe(404);
+    expect(body.error).toBe('provider_not_found');
+  });
+});
+
+describe('GET /providers/:address/services/:code/history', () => {
+  it('returns price changes oldest first', async () => {
+    const { status, body } = await get(`/providers/${CLINIC}/services/101/history`);
+    expect(status).toBe(200);
+    expect(body.history.map((h: { price: string }) => h.price)).toEqual([
+      '30000000',
+      '35000000',
+    ]);
+    expect(body.history[0].priceDisplay).toBe('3.0000000');
+  });
+
+  it('rejects a non-numeric service code', async () => {
+    const { status, body } = await get(`/providers/${CLINIC}/services/abc/history`);
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_code');
   });
 });
 

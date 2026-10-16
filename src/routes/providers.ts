@@ -81,4 +81,64 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       })),
     };
   });
+
+  /**
+   * Every status transition observed for a clinic, oldest first.
+   *
+   * A clinic suspended twice a year reads very differently from one never
+   * suspended, and the current status alone cannot tell them apart.
+   */
+  app.get('/providers/:address/history', async (req, reply) => {
+    const { address } = req.params as { address: string };
+    const provider = await prisma.provider.findUnique({
+      where: { address },
+      select: { address: true },
+    });
+    if (!provider) return reply.code(404).send({ error: 'provider_not_found' });
+
+    const changes = await prisma.providerStatusChange.findMany({
+      where: { providerAddress: address },
+      orderBy: [{ ledger: 'asc' }, { id: 'asc' }],
+    });
+
+    return {
+      address,
+      history: changes.map((c) => ({
+        status: c.status,
+        ledger: c.ledger,
+        changedAt: c.changedAt,
+      })),
+    };
+  });
+
+  /** Every observed price for one service, oldest first. */
+  app.get('/providers/:address/services/:code/history', async (req, reply) => {
+    const { address, code } = req.params as { address: string; code: string };
+    const serviceCode = Number(code);
+    if (!Number.isInteger(serviceCode) || serviceCode < 0) {
+      return reply.code(400).send({ error: 'invalid_code' });
+    }
+
+    const provider = await prisma.provider.findUnique({
+      where: { address },
+      select: { address: true },
+    });
+    if (!provider) return reply.code(404).send({ error: 'provider_not_found' });
+
+    const changes = await prisma.servicePriceChange.findMany({
+      where: { providerAddress: address, code: serviceCode },
+      orderBy: [{ ledger: 'asc' }, { id: 'asc' }],
+    });
+
+    return {
+      providerAddress: address,
+      code: serviceCode,
+      history: changes.map((c) => ({
+        price: c.price,
+        priceDisplay: fromBaseUnits(c.price),
+        ledger: c.ledger,
+        changedAt: c.changedAt,
+      })),
+    };
+  });
 }
