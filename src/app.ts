@@ -4,7 +4,14 @@ import type { IncomingMessage } from 'node:http';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
+import {
+  jsonSchemaTransform,
+  serializerCompiler,
+  validatorCompiler,
+} from 'fastify-type-provider-zod';
 
 import { env } from './env.js';
 import { errorEnvelope } from './lib/errors.js';
@@ -56,13 +63,29 @@ export async function buildApp(
     genReqId,
   });
 
-  // This API only ever serves JSON, so there is no document to lock down
-  // with a CSP. The remaining helmet defaults (nosniff, frame options, HSTS)
-  // still apply.
-  await app.register(helmet, { contentSecurityPolicy: false });
+  app.setValidatorCompiler(validatorCompiler);
+  app.setSerializerCompiler(serializerCompiler);
 
-  // Clinic connections are slow. Responses above 1 KB are worth compressing.
-  await app.register(compress, { threshold: 1024 });
+  await app.register(swagger, {
+    openapi: {
+      openapi: '3.1.0',
+      info: {
+        title: 'SCI Healthcare API',
+        description:
+          'Read-only API for the SCI Healthcare care-voucher protocol on Stellar. ' +
+          'All monetary amounts are decimal strings representing i128 values in ' +
+          'base units (stroops). A 7-decimal Stellar asset like USDC uses 10^7 ' +
+          'base units per whole token, so "30000000" = 3.0000000 USDC. Amounts ' +
+          'are strings, not numbers, because they can exceed Number.MAX_SAFE_INTEGER.',
+        version: '0.3.0',
+      },
+    },
+    transform: jsonSchemaTransform,
+  });
+
+  await app.register(swaggerUi, {
+    routePrefix: '/docs',
+  });
 
   await app.register(cors, {
     origin: env.CORS_ORIGIN.split(',').map((s) => s.trim()),
@@ -90,6 +113,10 @@ export async function buildApp(
       error: 'route_not_found',
       message: `Route ${req.method} ${req.url} not found`,
     });
+  });
+
+  app.get('/openapi.json', { schema: { hide: true } }, async () => {
+    return app.swagger();
   });
 
   // `/v1` is the canonical API. The unversioned paths stay as aliases for
