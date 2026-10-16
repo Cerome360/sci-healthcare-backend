@@ -8,6 +8,7 @@ import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
 import { isValidRef } from '../lib/beneficiary.js';
 import { csvRow } from '../lib/csv.js';
+import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
 import { ApiError } from '../lib/errors.js';
 import { isRefundable, isSettleable, refundableAt } from '../lib/lifecycle.js';
 import { serviceKey, serviceLabels } from '../lib/services.js';
@@ -33,7 +34,8 @@ const listQuery = z.object({
   status: statusList.optional(),
   sort: z.enum(['createdAt', 'expiresAt', 'amount']).default('createdAt'),
   order: z.enum(['asc', 'desc']).default('desc'),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: cursorParam,
+  limit: limitParam,
   offset: z.coerce.number().int().min(0).default(0),
 });
 
@@ -85,7 +87,8 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) {
       throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
     }
-    const { funder, provider, beneficiaryRef, status, sort, order, limit, offset } = parsed.data;
+    const { funder, provider, beneficiaryRef, status, sort, order, cursor, limit, offset } =
+      parsed.data;
 
     // At least one selector is required. An unfiltered dump of every
     // voucher in the system is not a useful endpoint and invites scraping.
@@ -95,6 +98,40 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
         'filter_required',
         'Provide at least one of: funder, provider, beneficiaryRef, status',
       );
+    }
+
+    if (cursor) {
+      const decoded = decodeCursor(cursor);
+      if (!decoded) {
+        throw new ApiError(400, 'invalid_cursor', 'Invalid cursor');
+      }
+
+      const cursorDate = new Date(decoded.createdAt);
+      const where = {
+        ...(funder ? { funder } : {}),
+        ...(provider ? { providerAddress: provider } : {}),
+        ...(beneficiaryRef ? { beneficiaryRef } : {}),
+        ...(status ? { status: { in: status } } : {}),
+        OR: [
+          { createdAt: { lt: cursorDate } },
+          { createdAt: cursorDate, id: { lt: decoded.id } },
+        ],
+      };
+
+      const rows = await prisma.voucher.findMany({
+        where,
+        include: { provider: true },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit + 1,
+      });
+
+      const hasNext = rows.length > limit;
+      const page = hasNext ? rows.slice(0, limit) : rows;
+      const labels = await serviceLabels(page);
+      const last = page[page.length - 1];
+      const nextCursor = hasNext && last ? encodeCursor(last.createdAt, last.id) : null;
+
+      return { limit, nextCursor, vouchers: page.map((v) => serialise(v, labels)) };
     }
 
     const where = {
@@ -110,20 +147,25 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
     if (sort === 'amount') {
       const all = await prisma.voucher.findMany({ where, include: { provider: true } });
       all.sort((a, b) => compareAmount(a, b, order));
-      rows = all.slice(offset, offset + limit);
+      rows = all.slice(offset, offset + limit + 1);
     } else {
       const primary = sort === 'createdAt' ? { createdAt: order } : { expiresAt: order };
       rows = await prisma.voucher.findMany({
         where,
         include: { provider: true },
         orderBy: [primary, { id: order }],
-        take: limit,
+        take: limit + 1,
         skip: offset,
       });
     }
 
-    const labels = await serviceLabels(rows);
-    return { total, limit, offset, vouchers: rows.map((v) => serialise(v, labels)) };
+    const hasNext = rows.length > limit;
+    const page = hasNext ? rows.slice(0, limit) : rows;
+    const labels = await serviceLabels(page);
+    const last = page[page.length - 1];
+    const nextCursor = hasNext && last ? encodeCursor(last.createdAt, last.id) : undefined;
+
+    return { total, limit, offset, nextCursor, vouchers: page.map((v) => serialise(v, labels)) };
   });
 
   /**

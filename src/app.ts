@@ -3,7 +3,14 @@ import type { IncomingMessage } from 'node:http';
 
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
 import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
+import {
+  jsonSchemaTransform,
+  serializerCompiler,
+  validatorCompiler,
+} from 'fastify-type-provider-zod';
 
 import { env } from './env.js';
 import { errorEnvelope } from './lib/errors.js';
@@ -55,6 +62,30 @@ export async function buildApp(
     genReqId,
   });
 
+  app.setValidatorCompiler(validatorCompiler);
+  app.setSerializerCompiler(serializerCompiler);
+
+  await app.register(swagger, {
+    openapi: {
+      openapi: '3.1.0',
+      info: {
+        title: 'SCI Healthcare API',
+        description:
+          'Read-only API for the SCI Healthcare care-voucher protocol on Stellar. ' +
+          'All monetary amounts are decimal strings representing i128 values in ' +
+          'base units (stroops). A 7-decimal Stellar asset like USDC uses 10^7 ' +
+          'base units per whole token, so "30000000" = 3.0000000 USDC. Amounts ' +
+          'are strings, not numbers, because they can exceed Number.MAX_SAFE_INTEGER.',
+        version: '0.3.0',
+      },
+    },
+    transform: jsonSchemaTransform,
+  });
+
+  await app.register(swaggerUi, {
+    routePrefix: '/docs',
+  });
+
   await app.register(cors, {
     origin: env.CORS_ORIGIN.split(',').map((s) => s.trim()),
     methods: ['GET'],
@@ -84,6 +115,10 @@ export async function buildApp(
       error: 'route_not_found',
       message: `Route ${req.method} ${req.url} not found`,
     });
+  });
+
+  app.get('/openapi.json', { schema: { hide: true } }, async () => {
+    return app.swagger();
   });
 
   // `/v1` is the canonical API. The unversioned paths stay as aliases for

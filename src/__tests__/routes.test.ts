@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { buildApp } from '../app.js';
 import { prisma } from '../db.js';
 import { CONTRACTS, env } from '../env.js';
+import { encodeCursor } from '../lib/cursor.js';
 import { CLAIM_GRACE_MS } from '../lib/lifecycle.js';
 import { server } from '../stellar/client.js';
 
@@ -278,7 +279,7 @@ async function seed() {
 
 beforeAll(async () => {
   app = await buildApp({ logger: false });
-});
+}, 30_000);
 
 afterAll(async () => {
   await app.close();
@@ -294,6 +295,26 @@ beforeEach(async () => {
   await prisma.providerStatusChange.deleteMany();
   await prisma.servicePriceChange.deleteMany();
   await seed();
+});
+
+describe('OpenAPI spec', () => {
+  it('serves a valid spec at /openapi.json', async () => {
+    const res = await app.inject({ method: 'GET', url: '/openapi.json' });
+    expect(res.statusCode).toBe(200);
+    const spec = res.json();
+    expect(spec.openapi).toMatch(/^3\./);
+    expect(spec.info.title).toBe('SCI Healthcare API');
+    expect(spec.paths['/vouchers']).toBeDefined();
+    expect(spec.paths['/providers']).toBeDefined();
+    expect(spec.paths['/receipts']).toBeDefined();
+    expect(spec.paths['/governance']).toBeDefined();
+  });
+
+  it('serves Swagger UI at /docs', async () => {
+    const res = await app.inject({ method: 'GET', url: '/docs' });
+    // swagger-ui redirects to /docs/ or returns HTML
+    expect([200, 302]).toContain(res.statusCode);
+  });
 });
 
 describe('GET /health and /stats', () => {
@@ -356,6 +377,26 @@ describe('GET /ready', () => {
       lagLedgers: 121,
       maxLagLedgers: env.READY_MAX_LAG_LEDGERS,
     });
+  });
+
+  it('returns 503 with gap details when the indexer has a retention gap', async () => {
+    await prisma.indexerState.upsert({
+      where: { id: 1 },
+      create: { id: 1, lastLedger: 50, gap: true, gapOldestLedger: 200, gapCursorLedger: 50 },
+      update: { lastLedger: 50, gap: true, gapOldestLedger: 200, gapCursorLedger: 50, leaseOwner: null, leaseExpiresAt: null },
+    });
+    vi.spyOn(server, 'getLatestLedger').mockResolvedValue({ sequence: 1000 } as never);
+
+    const { status, body } = await get('/ready');
+    expect(status).toBe(503);
+    expect(body.status).toBe('degraded');
+    expect(body.checks.indexer).toBe('gap');
+    expect(body.checks.gap).toMatchObject({
+      detected: true,
+      cursorLedger: 50,
+      oldestAvailable: 200,
+    });
+    expect(body.checks.gap.message).toContain('RUNBOOK');
   });
 });
 
@@ -938,6 +979,71 @@ describe('GET /governance', () => {
       pendingAdmin: null,
       history: [],
     });
+  });
+});
+
+describe('cursor pagination', () => {
+  it('pages through vouchers with cursor', async () => {
+    const { body: page1 } = await get(`/vouchers?funder=${FUNDER}&limit=2`);
+    expect(page1.vouchers).toHaveLength(2);
+
+    const cursor = encodeCursor(
+      new Date(page1.vouchers[1].createdAt),
+      page1.vouchers[1].id,
+    );
+    const { body: page2 } = await get(`/vouchers?funder=${FUNDER}&limit=2&cursor=${cursor}`);
+    expect(page2.vouchers.length).toBeGreaterThan(0);
+
+    const page1Ids = page1.vouchers.map((v: { id: string }) => v.id);
+    const page2Ids = page2.vouchers.map((v: { id: string }) => v.id);
+    expect(page1Ids.filter((id: string) => page2Ids.includes(id))).toEqual([]);
+  });
+
+  it('returns null nextCursor on the last page', async () => {
+    const { body } = await get(`/vouchers?funder=${FUNDER}&limit=100`);
+    expect(body.nextCursor).toBeUndefined();
+  });
+
+  it('rejects an invalid cursor', async () => {
+    const { status, body } = await get(`/vouchers?funder=${FUNDER}&cursor=not-valid!!`);
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_cursor');
+  });
+
+  it('pages through providers with cursor', async () => {
+    const seen: string[] = [];
+    let cursor: string | null | undefined;
+
+    // Page through all providers one at a time
+    do {
+      const url = cursor ? `/providers?limit=1&cursor=${cursor}` : '/providers?limit=1';
+      const { body } = await get(url);
+      expect(body.providers).toHaveLength(1);
+      seen.push(body.providers[0].address);
+      cursor = body.nextCursor;
+    } while (cursor);
+
+    // Should have visited every provider exactly once
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it('pages through receipts with cursor', async () => {
+    const { body: page1 } = await get(`/receipts?beneficiaryRef=${REF}&limit=1`);
+    expect(page1.receipts).toHaveLength(1);
+
+    const cursor = encodeCursor(
+      new Date(page1.receipts[0].settledAt),
+      page1.receipts[0].voucherId,
+    );
+    const { body: page2 } = await get(`/receipts?beneficiaryRef=${REF}&limit=1&cursor=${cursor}`);
+    expect(page2.receipts).toHaveLength(1);
+    expect(page2.receipts[0].voucherId).not.toBe(page1.receipts[0].voucherId);
+  });
+
+  it('sends Deprecation header when offset is used', async () => {
+    const res = await app.inject({ method: 'GET', url: `/vouchers?funder=${FUNDER}&offset=1` });
+    expect(res.headers['deprecation']).toBe('true');
   });
 });
 

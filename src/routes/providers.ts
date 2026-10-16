@@ -4,13 +4,15 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
 import { isPostgres } from '../lib/database.js';
+import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
 import { ApiError } from '../lib/errors.js';
 
 const listQuery = z.object({
   status: z.enum(['Pending', 'Active', 'Suspended']).optional(),
   country: z.string().length(2).optional(),
   q: z.string().min(1).max(64).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: cursorParam,
+  limit: limitParam,
   offset: z.coerce.number().int().min(0).default(0),
 });
 
@@ -26,7 +28,56 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) {
       throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
     }
-    const { status, country, q, limit, offset } = parsed.data;
+    const { status, country, q, cursor, limit, offset } = parsed.data;
+
+    const formatProvider = (p: {
+      address: string;
+      name: string;
+      country: string;
+      status: string;
+      registeredAt: Date;
+      services: { code: number; label: string; price: string }[];
+    }) => ({
+      address: p.address,
+      name: p.name,
+      country: p.country,
+      status: p.status,
+      registeredAt: p.registeredAt,
+      services: p.services.map((s) => ({
+        code: s.code,
+        label: s.label,
+        price: s.price,
+        priceDisplay: fromBaseUnits(s.price),
+      })),
+    });
+
+    if (cursor) {
+      const decoded = decodeCursor(cursor);
+      if (!decoded) {
+        throw new ApiError(400, 'invalid_cursor', 'Invalid cursor');
+      }
+      const cursorDate = new Date(decoded.createdAt);
+      const where = {
+        ...(status ? { status } : {}),
+        ...(country ? { country } : {}),
+        ...(q ? { name: nameContains(q) } : {}),
+        OR: [
+          { registeredAt: { lt: cursorDate } },
+          { registeredAt: cursorDate, address: { lt: decoded.id } },
+        ],
+      };
+      const rows = await prisma.provider.findMany({
+        where,
+        include: { services: { where: { active: true } } },
+        orderBy: [{ registeredAt: 'desc' }, { address: 'desc' }],
+        take: limit + 1,
+      });
+      const hasNext = rows.length > limit;
+      const page = hasNext ? rows.slice(0, limit) : rows;
+      const last = page[page.length - 1];
+      const nextCursor = hasNext && last ? encodeCursor(last.registeredAt, last.address) : null;
+      return { limit, nextCursor, providers: page.map(formatProvider) };
+    }
 
     const where = {
       ...(status ? { status } : {}),
@@ -38,31 +89,19 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       prisma.provider.findMany({
         where,
         include: { services: { where: { active: true } } },
-        orderBy: { registeredAt: 'desc' },
-        take: limit,
+        orderBy: [{ registeredAt: 'desc' }, { address: 'desc' }],
+        take: limit + 1,
         skip: offset,
       }),
       prisma.provider.count({ where }),
     ]);
 
-    return {
-      total,
-      limit,
-      offset,
-      providers: rows.map((p) => ({
-        address: p.address,
-        name: p.name,
-        country: p.country,
-        status: p.status,
-        registeredAt: p.registeredAt,
-        services: p.services.map((s) => ({
-          code: s.code,
-          label: s.label,
-          price: s.price,
-          priceDisplay: fromBaseUnits(s.price),
-        })),
-      })),
-    };
+    const hasNext = rows.length > limit;
+    const page = hasNext ? rows.slice(0, limit) : rows;
+    const last = page[page.length - 1];
+    const nextCursor = hasNext && last ? encodeCursor(last.registeredAt, last.address) : undefined;
+
+    return { total, limit, offset, nextCursor, providers: page.map(formatProvider) };
   });
 
   app.get('/providers/:address', async (req) => {
