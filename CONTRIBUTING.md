@@ -94,6 +94,10 @@ values and **must** be kept in step with the contracts. If you add an event or
 move a field between topic and data, update that map in the same change and add
 a case to `src/__tests__/events.test.ts`.
 
+The full pipeline — paging, the cursor and lease model, idempotency rules and
+failure modes — is in [docs/architecture.md](docs/architecture.md). Read it
+before changing anything under `src/stellar/`.
+
 ## Commits and PRs
 
 Conventional commits, one logical change each:

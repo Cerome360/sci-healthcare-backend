@@ -72,6 +72,8 @@ When the RPC fails, the indexer backs off exponentially (with jitter, up to `IND
 
 On `SIGTERM` (every Render deploy) or `SIGINT`, the indexer stops scheduling new cycles, waits for the cycle in flight to commit its transaction and save the cursor (bounded by `SHUTDOWN_TIMEOUT_MS`), then releases the lease so the replacement instance can take over immediately. The process then closes the HTTP server and the database connection, with a hard exit as a backstop. If the cycle overruns the timeout the lease is deliberately left to expire rather than freed, so a peer cannot race a cycle that may still be committing.
 
+See [docs/architecture.md](docs/architecture.md) for the full walkthrough: the paging and decode stages, the cursor and lease model, idempotency rules, and each failure mode with what to do about it.
+
 ## API
 
 Every route is served under the canonical `/v1` prefix. The unversioned paths
