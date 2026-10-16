@@ -44,6 +44,7 @@
 - **Indexer lease**: `IndexerState.leaseOwner` / `leaseExpiresAt` make the cursor single-writer. Standby instances log and retry instead of racing the cursor.
 - **Automated dependency updates**: `.github/dependabot.yml` opens one grouped npm PR a week (minor and patch) and one for GitHub Actions. Prisma updates arrive as their own PR labelled `do-not-merge`, so the auto-merge bot holds them until a maintainer has looked.
 - **CodeQL analysis**: `.github/workflows/codeql.yml` analyses JavaScript/TypeScript on pull requests into `main`, weekly and on demand, uploading results to code scanning. `src/__tests__/ci-workflows.test.ts` asserts the workflow keeps its triggers, permissions and actions.
+- **Uptime monitoring**: `.github/workflows/monitor.yml` probes the deployed `/ready` every 30 minutes, retrying so Render free-tier cold starts do not fail the run, and its badge is in the README. `docs/RUNBOOK.md` documents the free UptimeRobot setup, the alert contact and why `/ready` is the endpoint to watch rather than `/health`.
 
 ### Changed
 - **`/stats` response**: two new fields, `faucetDrips` and `faucetWallets`. Existing fields are unchanged.

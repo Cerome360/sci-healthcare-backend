@@ -35,3 +35,17 @@ describe('codeql.yml', () => {
     expect(yml).toMatch(/github\/codeql-action\/analyze@v\d+/);
   });
 });
+
+describe('monitor.yml', () => {
+  const yml = workflow('monitor.yml');
+
+  it('probes the readiness endpoint on a schedule', () => {
+    expect(yml).toMatch(/^on:/m);
+    expect(yml).toMatch(/^ {2}schedule:/m);
+    expect(yml).toMatch(/\/ready/);
+  });
+
+  it('gives Render cold starts room to wake before failing', () => {
+    expect(yml).toMatch(/--max-time \d{2,}/);
+  });
+});

@@ -119,3 +119,83 @@ deleted as soon as a run sees the voucher agree.
    contract has never heard of. `--fix` deliberately leaves those alone:
    it points at a wrong `VOUCHER_CONTRACT_ID` or a database restored from
    another network, which deleting rows would only hide.
+
+## Uptime monitoring
+
+Two layers watch the deployed service, and they answer different questions:
+
+| Layer | Watches | Raises |
+| --- | --- | --- |
+| The `Uptime monitor` GitHub workflow (committed in this repo) | `/ready` every 30 minutes | A failed run and a red README badge |
+| An external monitor (UptimeRobot below) | `/ready` every 5 minutes | Email to the alert contact |
+
+Neither of these can see the service get *slow*; they only prove `/ready`
+stays green. A paging on latency would need response-time alerting, which
+is outside the free plans this project runs on.
+
+### The scheduled GitHub workflow
+
+`.github/workflows/monitor.yml` curls
+`https://sci-healthcare-api.onrender.com/ready` every 30 minutes, retrying
+three times with a 120-second timeout so a Render free-tier cold start
+(~30–60 s) does not fail the run. A red run means `/ready` did not return
+2xx for several minutes, and the `Uptime monitor` badge in the README is
+red from the moment the failing run is reported until a run passes again.
+
+Two caveats, and the reason this is a backstop rather than the alerting
+mechanism:
+
+- Scheduled workflows can start several minutes late when GitHub's
+  scheduler is busy.
+- GitHub disables scheduled workflows after 60 days of repository
+  inactivity. If the badge has not moved in weeks, check the Actions tab
+  and re-enable the workflow.
+
+### Setting up the external monitor (UptimeRobot, free plan)
+
+The free plan covers a single monitor at a 5-minute interval with email
+alerts, which is all this needs:
+
+1. Create an account at <https://uptimerobot.com> and log in.
+2. **Add New Monitor** → monitor type **HTTP(s)**.
+3. Friendly name: `SCI Healthcare API`.
+4. URL: `https://sci-healthcare-api.onrender.com/ready`
+5. Monitoring interval: **5 minutes**.
+6. Keep the expected status at `200` and the default alert threshold. The
+   monitor should now appear on the dashboard with its status.
+7. **Alert contact**: the maintainer listed in the README's Maintainers
+   section ([@adelekevat](https://github.com/adelekevat)) — use that
+   maintainer's email address so alerts land with the person who can act
+   on them. The free plan includes email alerts; add more contacts in
+   **My Settings → Alert Contacts** if that changes.
+
+### Why `/ready` and not `/health`
+
+`/health` is liveness: it proves the process answers HTTP, nothing else. An
+API whose indexer silently stopped advancing, whose database has gone away,
+or whose RPC is unreachable still returns `200` on `/health`. `/ready` runs
+the real dependency checks — database, RPC, indexer lag against
+`READY_MAX_LAG_LEDGERS`, retention gap — and returns **503** with the
+failing check named. A 503 from this endpoint is a real alert, not a
+transient failure to filter out.
+
+### Cold-start false positives on Render's free tier
+
+The service sleeps after ~15 minutes idle and the first request pays 30–60
+seconds of wake-up time. Two consequences:
+
+- Keep the monitor's timeout at 60 seconds or longer. A 5-second timeout
+  will mark a healthy-but-waking service as down.
+- Even with retries, expect the occasional recovery alert around a wake-up.
+  If that becomes noisy, raise the alert threshold so two consecutive
+  failed checks are needed before alerting — a real outage fails many
+  checks in a row. Do not fix the noise by lengthening the interval; that
+  only delays the real alert.
+
+### Optional: swap the README badge to the external monitor
+
+The README ships with the GitHub workflow badge because it works with no
+account. Once an UptimeRobot monitor exists, shields.io can render its
+status instead — see the monitor's **Settings** for its monitor-specific
+API key and the shields.io `uptimerobot` badge URL — and the workflow
+badge block in `README.md` can be replaced with it.

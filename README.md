@@ -6,6 +6,9 @@
   <a href="https://github.com/Godgift-care/sci-healthcare-backend/actions/workflows/ci.yml">
     <img src="https://github.com/Godgift-care/sci-healthcare-backend/actions/workflows/ci.yml/badge.svg" alt="CI" />
   </a>
+  <a href="https://github.com/Godgift-care/sci-healthcare-backend/actions/workflows/monitor.yml">
+    <img src="https://github.com/Godgift-care/sci-healthcare-backend/actions/workflows/monitor.yml/badge.svg" alt="Uptime monitor" />
+  </a>
   <img src="https://img.shields.io/badge/node-22-green" alt="node 22" />
   <img src="https://img.shields.io/badge/fastify-5.12-black" alt="fastify" />
   <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="Apache 2.0" />

@@ -1,0 +1,40 @@
+name: Uptime monitor
+
+# Probes the deployed /ready endpoint on a schedule. /ready goes 503 when
+# the database or RPC is unreachable, or when the indexer has fallen behind
+# or out of the retention window — an outage the liveness endpoint would
+# sleep through. The README badge for this workflow reflects the latest run.
+#
+# GitHub can delay scheduled runs under load and disables them after 60
+# days of repository inactivity, so this is a badge/backstop, not a pager.
+# For alerts, pair it with an external monitor; see "Uptime monitoring" in
+# docs/RUNBOOK.md.
+
+on:
+  schedule:
+    # Every 30 minutes, off the hour because :00 is the busiest slot on
+    # GitHub's scheduler.
+    - cron: '17,47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe /ready
+    runs-on: ubuntu-latest
+    steps:
+      - name: Curl /ready (retries absorb Render free-tier cold starts)
+        run: |
+          url="https://sci-healthcare-api.onrender.com/ready"
+          for attempt in 1 2 3; do
+            echo "attempt $attempt: GET $url"
+            if curl --fail --silent --show-error --max-time 120 "$url"; then
+              exit 0
+            fi
+            echo "attempt $attempt failed; sleeping 30s before retrying"
+            sleep 30
+          done
+          echo "::error::$url did not return 2xx after 3 attempts"
+          exit 1
