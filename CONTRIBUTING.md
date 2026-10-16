@@ -67,6 +67,16 @@ test(events): cover an event with no data fields
 - Endpoints that return user data must require a specific filter. An unfiltered
   dump invites scraping and will not be merged.
 
+## How pull requests are merged
+
+A bot merges pull requests automatically (squash) as soon as every CI check on the latest commit has passed, provided the pull request:
+
+- is not a draft and has no `do-not-merge` label,
+- has no merge conflicts and is up to date with `main` (the bot comments if it is behind),
+- and, if it changes anything under `.github/` (CI workflows and repository automation), has been approved by a maintainer. The bot comments with the files that need approval.
+
+So open your pull request as a draft until it is ready, and keep CI green. To stop an automatic merge, add the `do-not-merge` label or convert the pull request back to a draft.
+
 ## Wave program
 
 Issues carry `trivial` (100), `medium` (150) or `high` (200) complexity labels.

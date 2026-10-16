@@ -58,6 +58,39 @@ services:
         value: "5063070"
       - key: INDEXER_POLL_MS
         value: "5000"
+      # /ready reports degraded when the indexer trails by more than this.
+      - key: READY_MAX_LAG_LEDGERS
+        value: "120"
       # Set to the Vercel URL after the frontend is deployed.
       - key: CORS_ORIGIN
         sync: false
+
+# ---------------------------------------------------------------------------
+# Optional: run the API and the indexer as separate services.
+#
+# The service above runs both in one process, which suits the free plan (a
+# background worker needs a paid instance type). To scale them
+# independently, delete `sci-healthcare-api` and uncomment the two services
+# below, duplicating its envVars block into each.
+#
+# - type: web
+#   name: sci-healthcare-api
+#   runtime: node
+#   plan: free
+#   region: oregon
+#   branch: main
+#   buildCommand: npm ci && ./scripts/use-postgres.sh && npx prisma generate && npm run build
+#   # The API owns schema pushes so the worker only ever reads.
+#   startCommand: npx prisma db push --skip-generate --accept-data-loss && npm run start:api
+#   healthCheckPath: /health
+#   envVars: ["...same as sci-healthcare-api above..."]
+#
+# - type: worker
+#   name: sci-healthcare-indexer
+#   runtime: node
+#   plan: starter
+#   region: oregon
+#   branch: main
+#   buildCommand: npm ci && ./scripts/use-postgres.sh && npx prisma generate && npm run build
+#   startCommand: npm run start:indexer
+#   envVars: ["...same contract ids and indexer settings as above..."]

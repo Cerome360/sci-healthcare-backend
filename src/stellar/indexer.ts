@@ -14,7 +14,22 @@ import {
   providerStatusName,
   type DecodedEvent,
 } from './events.js';
+import { IndexerLease } from './lease.js';
 import { collectEvents } from './paging.js';
+
+/**
+ * Contract events that are known but deliberately not part of the read
+ * model. Anything else reaching `applyEvent`'s default branch is a name this
+ * backend has never seen, which is worth one warning per process: a silent
+ * ignore would hide a contract upgrade that emits something new.
+ */
+const IGNORED_EVENTS = new Set([
+  'initialized',
+  'attester_added',
+  'attester_removed',
+  'dispute_resolved',
+  'minter_changed',
+]);
 
 /**
  * Polls Soroban RPC for contract events and projects them into the read
@@ -42,14 +57,29 @@ export function nextPollDelay(hasMore: boolean, pollMs: number): number {
   return hasMore ? 0 : pollMs;
 }
 
+export type IndexerOptions = {
+  /** Overridable for tests; defaults to a lease over this database. */
+  lease?: IndexerLease;
+};
+
 export class Indexer {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private stopped = false;
   /** Set by the last poll: true when a full page suggests a backlog. */
   private hasMore = false;
+  /** True while this instance holds the single-writer lease. */
+  private holdsLease = false;
+  /** Unknown event names already warned about; one warning per process. */
+  private readonly unknownEvents = new Set<string>();
+  private readonly lease: IndexerLease;
 
-  constructor(private readonly log: FastifyBaseLogger) {}
+  constructor(
+    private readonly log: FastifyBaseLogger,
+    opts: IndexerOptions = {},
+  ) {
+    this.lease = opts.lease ?? new IndexerLease();
+  }
 
   async start(): Promise<void> {
     const state = await prisma.indexerState.findUnique({ where: { id: 1 } });
@@ -58,22 +88,82 @@ export class Indexer {
         env.INDEXER_START_LEDGER > 0
           ? env.INDEXER_START_LEDGER
           : (await server.getLatestLedger()).sequence;
-      await prisma.indexerState.create({ data: { id: 1, lastLedger: from } });
+      // upsert, not create: two instances booting together must not race to
+      // insert the one row.
+      await prisma.indexerState.upsert({
+        where: { id: 1 },
+        create: { id: 1, lastLedger: from },
+        update: {},
+      });
       this.log.info({ from }, 'indexer initialised');
     }
+    this.holdsLease = await this.acquireLease();
     this.schedule();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
+    if (this.holdsLease) {
+      this.holdsLease = false;
+      await this.lease.release();
+    }
+  }
+
+  /**
+   * Runs one scheduled cycle: renew or take the lease, then poll. A standby
+   * instance does not touch the cursor; it just retries until the lease is
+   * free or expired.
+   */
+  private async cycle(): Promise<void> {
+    if (this.stopped) return;
+    try {
+      if (this.holdsLease && !(await this.lease.refresh())) {
+        this.holdsLease = false;
+        this.log.warn('indexer lease lost; standing by');
+      }
+      if (!this.holdsLease) {
+        this.holdsLease = await this.acquireLease();
+      }
+      // Shutdown may have raced the awaits above; never start work after
+      // stop(), and hand the lease back if it was taken mid-cycle.
+      if (this.stopped) {
+        if (this.holdsLease) {
+          this.holdsLease = false;
+          await this.lease.release();
+        }
+        return;
+      }
+      if (this.holdsLease) await this.tick();
+    } catch (err) {
+      this.log.error({ err }, 'indexer lease check failed');
+      this.hasMore = false;
+    } finally {
+      this.schedule();
+    }
+  }
+
+  private async acquireLease(): Promise<boolean> {
+    if (this.stopped) return false;
+    if (await this.lease.acquire()) {
+      this.log.info(
+        { owner: this.lease.owner, ttlMs: this.lease.ttlMs },
+        'indexer lease acquired; this instance is active',
+      );
+      return true;
+    }
+    this.log.info(
+      { owner: this.lease.owner },
+      'another indexer holds the lease; standing by',
+    );
+    return false;
   }
 
   private schedule(): void {
     if (this.stopped) return;
-    const delay = nextPollDelay(this.hasMore, env.INDEXER_POLL_MS);
+    const delay = nextPollDelay(this.hasMore && this.holdsLease, env.INDEXER_POLL_MS);
     this.timer = setTimeout(() => {
-      void this.tick().finally(() => this.schedule());
+      void this.cycle();
     }, delay);
   }
 
@@ -124,8 +214,18 @@ export class Indexer {
         await this.applyEvent(decoded);
         applied += 1;
       } catch (err) {
-        // One malformed event must not wedge the whole pipeline.
-        this.log.warn({ err, event: decoded.name, id: decoded.id }, 'event skipped');
+        // One malformed event must not wedge the whole pipeline. The tx hash
+        // and ledger are what make a skipped event reproducible.
+        this.log.warn(
+          {
+            err,
+            event: decoded.name,
+            id: decoded.id,
+            txHash: decoded.txHash,
+            ledger: decoded.ledger,
+          },
+          'event skipped',
+        );
       }
     }
 
@@ -196,10 +296,26 @@ export class Indexer {
         await this.onReceiptMinted(d);
         break;
       default:
-        // Initialized, minter_changed and token events are not part of the
-        // read model.
+        // Known-but-unprojected events stay silent; anything else is a name
+        // this backend has never seen and is reported once per process.
+        this.noteUnknown(e);
         break;
     }
+  }
+
+  private noteUnknown(e: DecodedEvent): void {
+    if (IGNORED_EVENTS.has(e.name) || this.unknownEvents.has(e.name)) return;
+    this.unknownEvents.add(e.name);
+    this.log.warn(
+      {
+        event: e.name,
+        id: e.id,
+        txHash: e.txHash,
+        ledger: e.ledger,
+        unknownEventNames: this.unknownEvents.size,
+      },
+      'unknown event ignored; this name will not be logged again',
+    );
   }
 
   private async onProviderRegistered(d: Record<string, unknown>): Promise<void> {

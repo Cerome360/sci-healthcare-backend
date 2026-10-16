@@ -13,6 +13,7 @@ const schema = z.object({
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
     .default('info'),
   CORS_ORIGIN: z.string().default('http://localhost:3000'),
+  READY_MAX_LAG_LEDGERS: z.coerce.number().int().nonnegative().default(120),
 
   DATABASE_URL: z.string().min(1),
 

@@ -71,6 +71,8 @@ function evaluate({ pr, ciRuns, checkRuns, files, reviews, writers, patterns }) 
   if (ciRuns.length === 0) return { action: 'wait', reason: 'ci-not-started' };
   const latestCi = [...ciRuns].sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
   if (latestCi.status !== 'completed') return { action: 'wait', reason: 'ci-running' };
+  // First-time contributors: GitHub holds CI until a maintainer approves the run.
+  if (latestCi.conclusion === 'action_required') return { action: 'skip', reason: 'ci-awaiting-approval' };
   if (latestCi.conclusion !== 'success') return { action: 'skip', reason: 'ci-failed' };
 
   // Every GitHub Actions check on the commit, not only CI, must be green.
@@ -93,11 +95,22 @@ function evaluate({ pr, ciRuns, checkRuns, files, reviews, writers, patterns }) 
   return { action: 'merge', reason: touched.length ? 'approved' : 'checks-passed' };
 }
 
+/**
+ * GITHUB_TOKEN may not create or update workflow files. Merging a branch
+ * that predates a workflow change on main counts as one, so GitHub rejects
+ * it with 403 even though the pull request itself does not touch .github.
+ */
+function isWorkflowPermissionError(err) {
+  return err && err.status === 403 && /not accessible by integration|workflow/i.test(err.message || '');
+}
+
 const MESSAGES = {
   conflicts: () =>
     'This pull request has merge conflicts with `main`. Please rebase or merge `main` into your branch; it will be merged automatically once CI passes again.',
   behind: () =>
     'All checks passed, but this branch is behind `main`, and `main` requires branches to be up to date. Please update your branch (merge or rebase `main`); it will be merged automatically once CI passes again.',
+  'workflow-drift': () =>
+    'All checks passed, but the CI workflows on `main` changed after this branch was created, and the bot is not allowed to merge a branch that would change workflow files. Please update your branch with `main` (merge or rebase); it will be merged automatically once CI passes again.',
   'needs-approval': (files) =>
     `All checks passed. This pull request changes files that control CI, deployment or dependencies, so a maintainer must approve it before it is merged automatically:\n\n${files
       .slice(0, 20)
@@ -176,6 +189,18 @@ async function handle({ github, context, core, pr, patterns }) {
       commit_title: `${full.title} (#${full.number})`,
     });
   } catch (err) {
+    if (isWorkflowPermissionError(err)) {
+      const key = `${MARKER} workflow-drift ${sha} -->`;
+      if (!(await alreadyCommented({ github, owner, repo, number: full.number, key }))) {
+        await github.rest.issues.createComment({
+          owner, repo, issue_number: full.number, body: `${MESSAGES['workflow-drift']()}
+
+${key}`,
+        });
+      }
+      core.info(`#${full.number}: branch predates a workflow change on main; asked the author to update`);
+      return { action: 'comment', reason: 'workflow-drift' };
+    }
     // Lost a race with a new push or another merge; the next event re-evaluates.
     core.warning(`#${full.number} not merged: ${err.message}`);
     return { action: 'wait', reason: 'merge-rejected' };
@@ -226,3 +251,4 @@ module.exports.evaluate = evaluate;
 module.exports.globToRegExp = globToRegExp;
 module.exports.parsePatterns = parsePatterns;
 module.exports.approvedByWriter = approvedByWriter;
+module.exports.isWorkflowPermissionError = isWorkflowPermissionError;

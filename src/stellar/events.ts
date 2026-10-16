@@ -37,6 +37,8 @@ export type DecodedEvent = {
   /** Topic fields and data fields merged into one record, keyed by name. */
   fields: Record<string, unknown>;
   contractId: string;
+  /** Transaction that emitted the event; the first thing to look up on a block explorer. */
+  txHash: string;
   ledger: number;
   ledgerClosedAt: Date;
   id: string;
@@ -59,6 +61,7 @@ function nativeOf(input: unknown): unknown {
 export function decodeEvent(raw: {
   id: string;
   contractId: unknown;
+  txHash?: unknown;
   ledger: number;
   ledgerClosedAt: string;
   topic: unknown[];
@@ -86,6 +89,7 @@ export function decodeEvent(raw: {
     name,
     fields,
     contractId: String(raw.contractId),
+    txHash: raw.txHash ? String(raw.txHash) : '',
     ledger: raw.ledger,
     ledgerClosedAt: new Date(raw.ledgerClosedAt),
     id: raw.id,

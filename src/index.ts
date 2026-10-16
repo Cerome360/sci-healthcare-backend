@@ -19,7 +19,7 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down');
-    indexer.stop();
+    await indexer.stop();
     await app.close();
     await disconnect();
     process.exit(0);

@@ -36,8 +36,10 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       checks.latestLedger = latest.sequence;
       checks.indexedLedger = state?.lastLedger ?? null;
       checks.lagLedgers = lag;
-      // Roughly 5s per ledger, so 120 ledgers is about 10 minutes behind.
-      if (lag !== null && lag > 120) {
+      // Configurable: roughly 5s per ledger, so the default of 120 ledgers
+      // is about 10 minutes behind.
+      checks.maxLagLedgers = env.READY_MAX_LAG_LEDGERS;
+      if (lag !== null && lag > env.READY_MAX_LAG_LEDGERS) {
         healthy = false;
         checks.indexer = 'lagging';
       } else {

@@ -63,12 +63,14 @@ region, with every contract id already set. The only value you add by hand is
 
 The indexer polls on an interval, applies each event to the read model, and only then advances its cursor — so a crash mid-batch replays rather than skips. Handlers are idempotent upserts keyed by on-chain id, which makes replay safe.
 
+The cursor is guarded by a lease (stored on `IndexerState`). However many indexer processes are running, exactly one holds the lease and advances the cursor; the others log that they are standing by and retry. Events are idempotent, but the cursor is not — two writers can skip events by advancing it from a stale read — which is the race the lease exists to prevent.
+
 ## API
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Liveness |
-| `GET /ready` | Readiness, including how many ledgers the indexer trails the chain by |
+| `GET /ready` | Readiness; 503 once the indexer trails by more than `READY_MAX_LAG_LEDGERS` |
 | `GET /stats` | Protocol counters for the dashboard |
 | `GET /providers` | Verified clinics, filterable by `status`, `country`, `q` |
 | `GET /providers/:address` | One clinic and its service catalogue |
@@ -140,6 +142,7 @@ npm run dev
 | `HOST` | Bind address | `0.0.0.0` |
 | `LOG_LEVEL` | pino level | `info` |
 | `CORS_ORIGIN` | Comma-separated allowed origins | `http://localhost:3000` |
+| `READY_MAX_LAG_LEDGERS` | Lag in ledgers at which `/ready` reports degraded | `120` |
 | `DATABASE_URL` | Resolved **relative to `prisma/`** | `file:./dev.db` |
 | `SOROBAN_RPC_URL` | Soroban RPC endpoint | `https://soroban-testnet.stellar.org` |
 | `NETWORK_PASSPHRASE` | Network passphrase | `Test SDF Network ; September 2015` |
@@ -152,13 +155,39 @@ npm run dev
 
 Set `INDEXER_START_LEDGER` to the deployment ledger. Leaving it at `0` starts at the current tip and silently skips all prior history. Soroban RPC also only retains a rolling window of ledgers (about 7 days on testnet) — an indexer that falls further behind than the window cannot catch up, and `/ready` will say so rather than pretend otherwise.
 
+`READY_MAX_LAG_LEDGERS` (default `120`, about ten minutes at five seconds a ledger) is where `/ready` flips from 200 to 503. A free-tier demo can tolerate a much larger window than production, so tune it per deployment. `GET /ready` echoes it as `checks.maxLagLedgers`.
+
+## Running the indexer and the API separately
+
+One process runs both by default (`npm start`). That is the right shape for a
+single small deployment: fewer moving parts, and the one-click Render blueprint
+assumes it.
+
+Split them when the API and the indexer have different scaling or failure needs
+— bursty API traffic alongside steady indexing, or more than one API replica.
+The entry points are:
+
+```bash
+npm run start:api        # HTTP API only, no indexer
+npm run start:indexer    # indexer only, no HTTP server
+```
+
+In development, `npm run dev:api` and `npm run dev:indexer` are the same split
+with a watch loop. The indexer holds the cursor lease, so extra replicas are
+safe: one indexes, the others log standby and retry. That also means combined
+mode can be scaled to several replicas without racing — but it wastes the
+standby replicas, which is the case for splitting.
+
+`render.yaml` carries a commented two-service example. A background worker
+needs a paid instance type, so the free-tier blueprint stays combined.
+
 ## Deploying
 
 Suited to a platform that runs long-lived processes with a database attached, such as Render.
 
 - Runtime: Node 22
 - Build: `npm ci && npx prisma generate && npm run build`
-- Start: `npm run db:migrate && npm start`
+- Start: `npm run db:migrate && npm start` (or `npm run start:api` / `npm run start:indexer` when split)
 - Switch `provider` in `prisma/schema.prisma` from `sqlite` to `postgresql`
 - Provision the database in the **same region** and use its internal connection string
 

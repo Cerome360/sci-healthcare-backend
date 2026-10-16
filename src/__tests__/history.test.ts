@@ -22,13 +22,14 @@ let seq = 0;
 function event(
   name: string,
   fields: Record<string, unknown>,
-  opts: Partial<Pick<DecodedEvent, 'contractId' | 'ledger' | 'ledgerClosedAt' | 'id'>> = {},
+  opts: Partial<Pick<DecodedEvent, 'contractId' | 'txHash' | 'ledger' | 'ledgerClosedAt' | 'id'>> = {},
 ): DecodedEvent {
   seq += 1;
   return {
     name,
     fields,
     contractId: opts.contractId ?? env.REGISTRY_CONTRACT_ID,
+    txHash: opts.txHash ?? `tx-${seq}`,
     ledger: opts.ledger ?? seq,
     ledgerClosedAt: opts.ledgerClosedAt ?? new Date('2026-10-01T00:00:00Z'),
     id: opts.id ?? `evt-${seq}`,

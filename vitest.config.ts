@@ -2,8 +2,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    // Only the app's vitest suites; `.github/scripts/automerge.test.cjs` is a
-    // node:test file with its own CI job and would fail collection here.
+    // .github/scripts has its own node:test suite, run by the CI bot job.
     include: ['src/**/*.test.ts'],
     // Environment must exist before src/env.ts is imported, and the test
     // database must exist before any route test runs.

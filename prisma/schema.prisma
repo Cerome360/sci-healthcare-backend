@@ -132,9 +132,19 @@ model ServicePriceChange {
   @@index([providerAddress, code, ledger])
 }
 
-/// Single-row table tracking how far the indexer has replayed the ledger.
+/// Single-row table tracking how far the indexer has replayed the ledger,
+/// and which process is currently allowed to advance it.
+///
+/// The lease is what keeps two indexers (a deploy overlap, or an API scaled
+/// past one replica) from racing on the cursor. It lives here rather than in
+/// a Postgres advisory lock so the exact same code path is exercised on the
+/// SQLite database used in development and tests.
 model IndexerState {
-  id          Int      @id @default(1)
-  lastLedger  Int
-  updatedAt   DateTime @updatedAt
+  id             Int       @id @default(1)
+  lastLedger     Int
+  updatedAt      DateTime  @updatedAt
+  /// Instance holding the lease; null when no one is indexing.
+  leaseOwner     String?
+  /// After this instant the lease is free for another instance to take.
+  leaseExpiresAt DateTime?
 }

@@ -1,12 +1,11 @@
 import type { FastifyInstance } from 'fastify';
-import { gunzipSync } from 'node:zlib';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildApp } from '../app.js';
 import { prisma } from '../db.js';
-import { CONTRACTS } from '../env.js';
+import { CONTRACTS, env } from '../env.js';
 import { CLAIM_GRACE_MS } from '../lib/lifecycle.js';
-import { LIST_ROUTE_RATE_LIMIT } from '../lib/rate-limits.js';
+import { server } from '../stellar/client.js';
 
 const CLINIC = 'GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK';
 const PENDING_CLINIC = 'GBWBYKGC5OCRELVP5WHAKEMBSZMNUY3HOKVSYBQGLFNWWQHNH2SD53FZ';
@@ -248,6 +247,50 @@ describe('GET /health and /stats', () => {
       settledVouchers: 1,
       settledValue: '30000000',
       receipts: 2,
+    });
+  });
+});
+
+describe('GET /ready', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  async function seedCursor(lastLedger: number) {
+    await prisma.indexerState.upsert({
+      where: { id: 1 },
+      create: { id: 1, lastLedger },
+      update: { lastLedger, leaseOwner: null, leaseExpiresAt: null },
+    });
+  }
+
+  it('defaults the lag threshold to 120 ledgers', () => {
+    expect(env.READY_MAX_LAG_LEDGERS).toBe(120);
+  });
+
+  it('is ready at exactly the threshold', async () => {
+    await seedCursor(1000);
+    vi.spyOn(server, 'getLatestLedger').mockResolvedValue({ sequence: 1120 } as never);
+
+    const { status, body } = await get('/ready');
+    expect(status).toBe(200);
+    expect(body.status).toBe('ready');
+    expect(body.checks).toMatchObject({
+      indexer: 'ok',
+      lagLedgers: 120,
+      maxLagLedgers: env.READY_MAX_LAG_LEDGERS,
+    });
+  });
+
+  it('is degraded one ledger past the threshold', async () => {
+    await seedCursor(1000);
+    vi.spyOn(server, 'getLatestLedger').mockResolvedValue({ sequence: 1121 } as never);
+
+    const { status, body } = await get('/ready');
+    expect(status).toBe(503);
+    expect(body.status).toBe('degraded');
+    expect(body.checks).toMatchObject({
+      indexer: 'lagging',
+      lagLedgers: 121,
+      maxLagLedgers: env.READY_MAX_LAG_LEDGERS,
     });
   });
 });

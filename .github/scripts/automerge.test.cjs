@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { evaluate, parsePatterns, approvedByWriter } = require('./automerge.cjs');
+const { evaluate, parsePatterns, approvedByWriter, isWorkflowPermissionError } = require('./automerge.cjs');
 
 const SHA = 'a'.repeat(40);
 const patterns = parsePatterns(`
@@ -43,6 +43,17 @@ test('skips drafts, closed pull requests and do-not-merge', () => {
 test('waits until CI has run on this commit and finished', () => {
   assert.equal(evaluate(base({ ciRuns: [] })).reason, 'ci-not-started');
   assert.equal(evaluate(base({ ciRuns: ci('in_progress', null) })).reason, 'ci-running');
+});
+
+test('reports CI that is waiting for a maintainer to approve the run', () => {
+  assert.deepEqual(evaluate(base({ ciRuns: ci('completed', 'action_required') })),
+    { action: 'skip', reason: 'ci-awaiting-approval' });
+});
+
+test('recognises the workflow-permission merge rejection', () => {
+  assert.ok(isWorkflowPermissionError({ status: 403, message: 'Resource not accessible by integration' }));
+  assert.ok(!isWorkflowPermissionError({ status: 405, message: 'Head branch was modified' }));
+  assert.ok(!isWorkflowPermissionError({ status: 403, message: 'Must have admin rights' }));
 });
 
 test('never merges a failed CI run, and uses the latest run', () => {

@@ -7,14 +7,15 @@
 - **GET /receipts/:voucherId**: Fetch a single receipt by voucher ID for shareable receipt pages and verification. No beneficiary reference in response.
 - **GET /vouchers/due?within=72h**: Vouchers needing action soon (expiring, becoming refundable, or settleable) with funder or provider filter. Uses lifecycle logic from `src/lib/lifecycle.ts` so API and contracts agree.
 - **Multi-status filter for vouchers**: `?status=Claimed,Attested` accepts comma-separated list validated against the status enum; invalid values rejected.
-- **api:** `createdFrom`, `createdTo`, `minAmount` and `maxAmount` filters on `GET /vouchers`, for period and value-band reporting. Dates are ISO 8601 strings; amounts are base-unit strings compared numerically with `BigInt`.
-- **api:** gzip compression (`@fastify/compress`) for responses above 1 KB, so payloads are smaller on slow clinic connections.
-- **api:** standard security headers via `@fastify/helmet`; CSP is disabled because the API serves JSON only.
-- **api:** tighter per-route rate limits for list routes (`GET /vouchers`, `/vouchers/due`, `/providers`, `/receipts`: 30 requests/minute), with `/health` and `/ready` exempt. The global default remains 120 requests/minute.
+- **`READY_MAX_LAG_LEDGERS`** (default `120`): lag in ledgers at which `/ready` reports degraded. The response echoes it as `checks.maxLagLedgers`.
+- **Split API and indexer entry points**: `npm run start:api` and `npm run start:indexer`; combined `npm start` stays the default. Commented two-service example in `render.yaml`.
+- **Indexer lease**: `IndexerState.leaseOwner` / `leaseExpiresAt` make the cursor single-writer. Standby instances log and retry instead of racing the cursor.
 
 ### Changed
 - **GET /receipts**: Now requires exactly one of `beneficiaryRef` or `provider` query parameters.
 - **GET /vouchers**: Status filter now accepts comma-separated values (e.g., `Claimed,Attested`) instead of a single value.
+- **Indexer logs**: skipped events now include the transaction hash and ledger; an unknown event name is warned once per process instead of silently ignored.
+- **`IndexerState` schema**: two nullable columns added; `prisma db push` adds them in place (no backfill needed).
 
 ### Fixed
 - **tests:** vitest now collects only `src/**/*.test.ts`. The `node:test` suite at `.github/scripts/automerge.test.cjs` has its own CI job, but was also being collected by vitest and failed `npm test` as "no test suite found".
