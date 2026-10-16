@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- **`/v1` API versioning**: every route is also served under `/v1`. The unversioned paths remain as aliases and carry `Deprecation: true` plus a `Link` header naming the `/v1` successor.
+- **`X-Request-Id`**: accepted (validated, log-safe) or generated, echoed on every response and present as `reqId` in the matching log line.
+- **GET /vouchers.csv**: streamed RFC 4180 CSV export with the same filters as `GET /vouchers`. At least one filter is required and there is no beneficiary reference column.
 - **GET /services**: Service catalogue across active clinics, grouped by code, with unique labels, clinic count and min/max/median price. Aggregates are computed with `BigInt`; the median of an even number of prices is the floor of the mean of the two middle values.
 - **GET /services/:code**: Active clinics offering one service code, cheapest first, each with `price` and `priceDisplay`.
 - **GET /countries**: Countries with at least one active clinic and their clinic counts, for building filters without paging every provider.
@@ -17,6 +20,7 @@
 - **Indexer lease**: `IndexerState.leaseOwner` / `leaseExpiresAt` make the cursor single-writer. Standby instances log and retry instead of racing the cursor.
 
 ### Changed
+- **Error responses**: every route now returns the one `{ error, message, details? }` envelope via the app-level error and not-found handlers. Unhandled failures are `internal_error`, with the cause left in the log rather than the response.
 - **GET /receipts**: Now requires exactly one of `beneficiaryRef` or `provider` query parameters.
 - **GET /vouchers**: Status filter now accepts comma-separated values (e.g., `Claimed,Attested`) instead of a single value.
 - **Indexer logs**: skipped events now include the transaction hash and ledger; an unknown event name is warned once per process instead of silently ignored.
