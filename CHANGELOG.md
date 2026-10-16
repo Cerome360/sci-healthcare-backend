@@ -43,6 +43,7 @@
 - **Split API and indexer entry points**: `npm run start:api` and `npm run start:indexer`; combined `npm start` stays the default. Commented two-service example in `render.yaml`.
 - **Indexer lease**: `IndexerState.leaseOwner` / `leaseExpiresAt` make the cursor single-writer. Standby instances log and retry instead of racing the cursor.
 - **Automated dependency updates**: `.github/dependabot.yml` opens one grouped npm PR a week (minor and patch) and one for GitHub Actions. Prisma updates arrive as their own PR labelled `do-not-merge`, so the auto-merge bot holds them until a maintainer has looked.
+- **CodeQL analysis**: `.github/workflows/codeql.yml` analyses JavaScript/TypeScript on pull requests into `main`, weekly and on demand, uploading results to code scanning. `src/__tests__/ci-workflows.test.ts` asserts the workflow keeps its triggers, permissions and actions.
 
 ### Changed
 - **`/stats` response**: two new fields, `faucetDrips` and `faucetWallets`. Existing fields are unchanged.
