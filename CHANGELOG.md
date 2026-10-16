@@ -56,6 +56,7 @@
 - **GET /vouchers**: Status filter now accepts comma-separated values (e.g., `Claimed,Attested`) instead of a single value.
 - **Indexer logs**: skipped events now include the transaction hash and ledger; an unknown event name is warned once per process instead of silently ignored.
 - **`IndexerState` schema**: two nullable columns added; `prisma db push` adds them in place (no backfill needed).
+- **README environment reference**: the Environment table now documents every variable `src/env.ts` accepts, with Required, Default, Example and description columns; `STELLAR_NETWORK` was missing. `src/__tests__/env-docs.test.ts` fails when the table and the schema drift apart.
 
 ### Fixed
 - **tests:** vitest now collects only `src/**/*.test.ts`. The `node:test` suite at `.github/scripts/automerge.test.cjs` has its own CI job, but was also being collected by vitest and failed `npm test` as "no test suite found".
