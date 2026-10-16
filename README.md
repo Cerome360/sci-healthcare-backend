@@ -72,13 +72,24 @@ The indexer polls on an interval, applies each event to the read model, and only
 | `GET /stats` | Protocol counters for the dashboard |
 | `GET /providers` | Verified clinics, filterable by `status`, `country`, `q` |
 | `GET /providers/:address` | One clinic and its service catalogue |
-| `GET /vouchers` | Vouchers by `funder`, `provider`, `beneficiaryRef` or `status` |
+| `GET /vouchers` | Vouchers by `funder`, `provider`, `beneficiaryRef`, `status`, a `createdFrom`/`createdTo` window or a `minAmount`/`maxAmount` band |
 | `GET /vouchers/:id` | One voucher, with its care receipt if settled |
 | `GET /receipts?beneficiaryRef=` | A patient's settled care history |
 
 `GET /vouchers` **requires at least one filter**. An unfiltered dump of every voucher is not a useful endpoint and invites scraping.
 
+`createdFrom` and `createdTo` are ISO 8601 timestamps and filter on `createdAt`. `minAmount` and `maxAmount` are i128 base-unit strings and are compared numerically, so `"9000000"` is correctly below `"10000000"`.
+
 `/receipts` requires an exact `beneficiaryRef`. Because that value is an HMAC under a key held by the patient, the endpoint cannot be walked to enumerate people.
+
+### Response behaviour
+
+List routes (`/vouchers`, `/providers`, `/receipts`) are limited to 30 requests
+per minute per client; other routes default to 120, while `/health` and `/ready`
+are exempt so a struggling service can always be probed. JSON above 1 KB is
+gzip-compressed when the client accepts it, and every response carries the
+standard `@fastify/helmet` security headers (no CSP — this API serves JSON, not
+HTML).
 
 ### Example
 

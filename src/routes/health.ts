@@ -5,14 +5,16 @@ import { env } from '../env.js';
 import { server } from '../stellar/client.js';
 
 export async function healthRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/health', async () => ({ status: 'ok' }));
+  // Liveness and readiness are exempt from rate limiting so a sleeping or
+  // struggling service can always be probed.
+  app.get('/health', { config: { rateLimit: false } }, async () => ({ status: 'ok' }));
 
   /**
    * Readiness, including how far the indexer trails the chain. A large or
    * growing lag is the first symptom of nearly every problem this service
    * can have, so it is surfaced rather than buried in logs.
    */
-  app.get('/ready', async (_req, reply) => {
+  app.get('/ready', { config: { rateLimit: false } }, async (_req, reply) => {
     const checks: Record<string, unknown> = {};
     let healthy = true;
 

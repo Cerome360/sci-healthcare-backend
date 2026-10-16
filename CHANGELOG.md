@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **api:** `createdFrom`, `createdTo`, `minAmount` and `maxAmount` filters on `GET /vouchers`, for period and value-band reporting. Dates are ISO 8601 strings; amounts are base-unit strings compared numerically with `BigInt`.
+- **api:** gzip compression (`@fastify/compress`) for responses above 1 KB, so payloads are smaller on slow clinic connections.
+- **api:** standard security headers via `@fastify/helmet`; CSP is disabled because the API serves JSON only.
+- **api:** tighter per-route rate limits for list routes (`GET /vouchers`, `/providers`, `/receipts`: 30 requests/minute), with `/health` and `/ready` exempt. The global default remains 120 requests/minute.
+
 ## 0.2.0 — 2026-10-09
 
 ### Fixed

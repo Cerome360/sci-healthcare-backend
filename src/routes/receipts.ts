@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
 import { isValidRef } from '../lib/beneficiary.js';
+import { LIST_ROUTE_RATE_LIMIT } from '../lib/rate-limits.js';
 import { serviceKey, serviceLabels } from '../lib/services.js';
 
 const query = z.object({
@@ -21,7 +22,7 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
    * knows the patient's identifier and key can construct it — the endpoint
    * cannot be walked to enumerate patients.
    */
-  app.get('/receipts', async (req, reply) => {
+  app.get('/receipts', { config: { rateLimit: LIST_ROUTE_RATE_LIMIT } }, async (req, reply) => {
     const parsed = query.safeParse(req.query);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });

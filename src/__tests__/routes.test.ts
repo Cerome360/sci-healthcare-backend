@@ -1,9 +1,11 @@
 import type { FastifyInstance } from 'fastify';
+import { gunzipSync } from 'node:zlib';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { buildApp } from '../app.js';
 import { prisma } from '../db.js';
 import { CLAIM_GRACE_MS } from '../lib/lifecycle.js';
+import { LIST_ROUTE_RATE_LIMIT } from '../lib/rate-limits.js';
 
 const CLINIC = 'GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK';
 const PENDING_CLINIC = 'GBWBYKGC5OCRELVP5WHAKEMBSZMNUY3HOKVSYBQGLFNWWQHNH2SD53FZ';
@@ -255,6 +257,46 @@ describe('GET /vouchers', () => {
     const { body } = await get('/vouchers?status=Disputed');
     expect(body.vouchers[0]).toMatchObject({ id: '5', disputeReason: 2 });
   });
+
+  it('filters by creation window, alone and combined with a funder', async () => {
+    const from = encodeURIComponent(new Date(Date.now() - 6 * DAY).toISOString());
+    const to = encodeURIComponent(new Date(Date.now() - 20 * DAY).toISOString());
+
+    const recent = await get(`/vouchers?createdFrom=${from}`);
+    expect(recent.body.total).toBe(2);
+    expect(recent.body.vouchers.map((v: { id: string }) => v.id)).toEqual(['5', '4']);
+
+    const older = await get(`/vouchers?funder=${FUNDER}&createdTo=${to}`);
+    expect(older.body.vouchers.map((v: { id: string }) => v.id)).toEqual(['3', '2']);
+  });
+
+  it('compares amounts numerically, not as strings', async () => {
+    // 10,000,000 sorts before 9,000,000 as a string but not numerically.
+    const { body } = await get('/vouchers?minAmount=9000000');
+    expect(body.total).toBe(5);
+    expect(body.vouchers.map((v: { id: string }) => v.id)).toEqual(['5', '4', '1', '3', '2']);
+
+    const capped = await get(`/vouchers?funder=${FUNDER}&maxAmount=30000000`);
+    expect(capped.body.vouchers.map((v: { id: string }) => v.id)).toEqual(['5', '4', '1', '2']);
+  });
+
+  it('combines an amount band with a status', async () => {
+    const { body } = await get(
+      `/vouchers?provider=${CLINIC}&status=Attested&minAmount=20000000&maxAmount=40000000`,
+    );
+    expect(body.vouchers.map((v: { id: string }) => v.id)).toEqual(['4']);
+  });
+
+  it('rejects malformed dates and amounts', async () => {
+    expect((await get('/vouchers?createdFrom=yesterday')).status).toBe(400);
+    expect((await get('/vouchers?minAmount=-1')).status).toBe(400);
+    expect((await get('/vouchers?minAmount=abc')).status).toBe(400);
+    expect(
+      (await get('/vouchers?createdFrom=2026-10-10T00:00:00Z&createdTo=2026-10-01T00:00:00Z'))
+        .status,
+    ).toBe(400);
+    expect((await get('/vouchers?minAmount=20000000&maxAmount=10000000')).status).toBe(400);
+  });
 });
 
 describe('GET /vouchers/:id', () => {
@@ -294,5 +336,60 @@ describe('GET /receipts', () => {
   it('requires a beneficiary reference', async () => {
     const { status } = await get('/receipts');
     expect(status).toBe(400);
+  });
+});
+
+describe('response hardening', () => {
+  it('sends the standard security headers, without a CSP', async () => {
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+    expect(res.headers['x-frame-options']).toBe('SAMEORIGIN');
+    expect(res.headers['referrer-policy']).toBe('no-referrer');
+    expect(res.headers['strict-transport-security']).toContain('max-age=');
+    expect(res.headers['content-security-policy']).toBeUndefined();
+  });
+
+  it('gzip-compresses responses above the threshold when asked', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/vouchers?funder=${FUNDER}`,
+      headers: { 'accept-encoding': 'gzip' },
+    });
+    expect(res.headers['content-encoding']).toBe('gzip');
+    const body = JSON.parse(gunzipSync(res.rawPayload).toString('utf8'));
+    expect(body.total).toBe(5);
+  });
+
+  it('leaves responses below the threshold uncompressed', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/health',
+      headers: { 'accept-encoding': 'gzip' },
+    });
+    expect(res.headers['content-encoding']).toBeUndefined();
+  });
+
+  it('rate limits list routes but leaves health free', async () => {
+    const isolated = await buildApp({ logger: false });
+    try {
+      for (let i = 0; i < LIST_ROUTE_RATE_LIMIT.max; i++) {
+        const res = await isolated.inject({
+          method: 'GET',
+          url: `/vouchers?funder=${FUNDER}`,
+        });
+        expect(res.statusCode).toBe(200);
+      }
+
+      const blocked = await isolated.inject({
+        method: 'GET',
+        url: `/vouchers?funder=${FUNDER}`,
+      });
+      expect(blocked.statusCode).toBe(429);
+
+      const health = await isolated.inject({ method: 'GET', url: '/health' });
+      expect(health.statusCode).toBe(200);
+    } finally {
+      await isolated.close();
+    }
   });
 });

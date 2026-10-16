@@ -20,7 +20,9 @@
     "db:migrate": "prisma migrate deploy"
   },
   "dependencies": {
+    "@fastify/compress": "9.2.2",
     "@fastify/cors": "11.1.0",
+    "@fastify/helmet": "13.2.0",
     "@fastify/rate-limit": "10.3.0",
     "@prisma/client": "6.19.3",
     "@stellar/stellar-sdk": "17.0.1",

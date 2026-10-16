@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
+import { LIST_ROUTE_RATE_LIMIT } from '../lib/rate-limits.js';
 
 const listQuery = z.object({
   status: z.enum(['Pending', 'Active', 'Suspended']).optional(),
@@ -13,7 +14,7 @@ const listQuery = z.object({
 });
 
 export async function providerRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/providers', async (req, reply) => {
+  app.get('/providers', { config: { rateLimit: LIST_ROUTE_RATE_LIMIT } }, async (req, reply) => {
     const parsed = listQuery.safeParse(req.query);
     if (!parsed.success) {
       return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
