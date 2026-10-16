@@ -26,27 +26,16 @@ const statusList = z
   .transform((s) => s.split(',').map((x) => x.trim()))
   .pipe(z.array(z.enum(STATUSES)).min(1));
 
-const listQuery = z
-  .object({
-    funder: z.string().length(56).optional(),
-    provider: z.string().length(56).optional(),
-    beneficiaryRef: z.string().refine(isValidRef, 'must be 64 hex characters').optional(),
-    status: statusList.optional(),
-    createdFrom: z.string().datetime({ offset: true }).optional(),
-    createdTo: z.string().datetime({ offset: true }).optional(),
-    minAmount: z.string().regex(BASE_UNITS, 'must be base units as an integer string').optional(),
-    maxAmount: z.string().regex(BASE_UNITS, 'must be base units as an integer string').optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(50),
-    offset: z.coerce.number().int().min(0).default(0),
-  })
-  .refine(
-    (q) => !q.createdFrom || !q.createdTo || Date.parse(q.createdFrom) <= Date.parse(q.createdTo),
-    { message: 'must not be later than createdTo', path: ['createdFrom'] },
-  )
-  .refine(
-    (q) => !q.minAmount || !q.maxAmount || BigInt(q.minAmount) <= BigInt(q.maxAmount),
-    { message: 'must not exceed maxAmount', path: ['minAmount'] },
-  );
+const listQuery = z.object({
+  funder: z.string().length(56).optional(),
+  provider: z.string().length(56).optional(),
+  beneficiaryRef: z.string().refine(isValidRef, 'must be 64 hex characters').optional(),
+  status: statusList.optional(),
+  sort: z.enum(['createdAt', 'expiresAt', 'amount']).default('createdAt'),
+  order: z.enum(['asc', 'desc']).default('desc'),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
 
 const dueQuery = z.object({
   funder: z.string().length(56).optional(),
@@ -55,26 +44,21 @@ const dueQuery = z.object({
 });
 
 export async function voucherRoutes(app: FastifyInstance): Promise<void> {
-  app.get(
-    '/vouchers',
-    { config: { rateLimit: LIST_ROUTE_RATE_LIMIT } },
-    async (req, reply) => {
-      const parsed = listQuery.safeParse(req.query);
-      if (!parsed.success) {
-        return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
-      }
-      const {
-        funder,
-        provider,
-        beneficiaryRef,
-        status,
-        createdFrom,
-        createdTo,
-        minAmount,
-        maxAmount,
-        limit,
-        offset,
-      } = parsed.data;
+  app.get('/vouchers', async (req, reply) => {
+    const parsed = listQuery.safeParse(req.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
+    }
+    const { funder, provider, beneficiaryRef, status, sort, order, limit, offset } = parsed.data;
+
+    // At least one selector is required. An unfiltered dump of every
+    // voucher in the system is not a useful endpoint and invites scraping.
+    if (!funder && !provider && !beneficiaryRef && !status) {
+      return reply.code(400).send({
+        error: 'filter_required',
+        message: 'Provide at least one of: funder, provider, beneficiaryRef, status',
+      });
+    }
 
       // At least one selector is required. An unfiltered dump of every
       // voucher in the system is not a useful endpoint and invites scraping.
@@ -96,20 +80,23 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      const where: Prisma.VoucherWhereInput = {
-        ...(funder ? { funder } : {}),
-        ...(provider ? { providerAddress: provider } : {}),
-        ...(beneficiaryRef ? { beneficiaryRef } : {}),
-        ...(status ? { status: { in: status } } : {}),
-        ...(createdFrom || createdTo
-          ? {
-              createdAt: {
-                ...(createdFrom ? { gte: new Date(createdFrom) } : {}),
-                ...(createdTo ? { lte: new Date(createdTo) } : {}),
-              },
-            }
-          : {}),
-      };
+    const total = await prisma.voucher.count({ where });
+
+    let rows: Row[];
+    if (sort === 'amount') {
+      const all = await prisma.voucher.findMany({ where, include: { provider: true } });
+      all.sort((a, b) => compareAmount(a, b, order));
+      rows = all.slice(offset, offset + limit);
+    } else {
+      const primary = sort === 'createdAt' ? { createdAt: order } : { expiresAt: order };
+      rows = await prisma.voucher.findMany({
+        where,
+        include: { provider: true },
+        orderBy: [primary, { id: order }],
+        take: limit,
+        skip: offset,
+      });
+    }
 
       const min = minAmount === undefined ? null : BigInt(minAmount);
       const max = maxAmount === undefined ? null : BigInt(maxAmount);
@@ -256,6 +243,19 @@ function parseWithin(within: string, now: number): number {
     default:
       return now;
   }
+}
+
+function compareAmount(
+  a: { id: string; amount: string },
+  b: { id: string; amount: string },
+  order: 'asc' | 'desc',
+): number {
+  const av = BigInt(a.amount);
+  const bv = BigInt(b.amount);
+  const sign = order === 'asc' ? 1 : -1;
+  if (av !== bv) return av < bv ? -sign : sign;
+  if (a.id === b.id) return 0;
+  return a.id < b.id ? -sign : sign;
 }
 
 type Row = {
