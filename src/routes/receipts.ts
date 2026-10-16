@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
 import { isValidRef } from '../lib/beneficiary.js';
+import { ApiError } from '../lib/errors.js';
 import { serviceKey, serviceLabels } from '../lib/services.js';
 
 const listQuery = z
@@ -31,10 +32,10 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
    * knows the patient's identifier and key can construct it — the endpoint
    * cannot be walked to enumerate patients.
    */
-  app.get('/receipts', async (req, reply) => {
+  app.get('/receipts', async (req) => {
     const parsed = listQuery.safeParse(req.query);
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
+      throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
     }
     const { beneficiaryRef, provider, limit, offset } = parsed.data;
 
@@ -87,17 +88,17 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
    * Used for shareable receipt pages and verification. No beneficiary
    * reference is included in the response.
    */
-  app.get('/receipts/:voucherId', async (req, reply) => {
+  app.get('/receipts/:voucherId', async (req) => {
     const parsed = voucherIdParam.safeParse(req.params);
     if (!parsed.success) {
-      return reply.code(400).send({ error: 'invalid_query', issues: parsed.error.issues });
+      throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
     }
     const { voucherId } = parsed.data;
 
     const receipt = await prisma.receipt.findUnique({
       where: { voucherId },
     });
-    if (!receipt) return reply.code(404).send({ error: 'receipt_not_found' });
+    if (!receipt) throw new ApiError(404, 'receipt_not_found', 'Receipt not found');
 
     const labels = await serviceLabels([receipt]);
     return {
