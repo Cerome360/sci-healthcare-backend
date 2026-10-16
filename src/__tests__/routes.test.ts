@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { gunzipSync } from 'node:zlib';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildApp } from '../app.js';
@@ -6,6 +7,7 @@ import { prisma } from '../db.js';
 import { CONTRACTS, env } from '../env.js';
 import { encodeCursor } from '../lib/cursor.js';
 import { CLAIM_GRACE_MS } from '../lib/lifecycle.js';
+import { LIST_ROUTE_RATE_LIMIT } from '../lib/rate-limits.js';
 import { server } from '../stellar/client.js';
 
 const CLINIC = 'GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK';
