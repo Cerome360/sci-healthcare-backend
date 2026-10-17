@@ -15,6 +15,23 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// Tracks all contract deployments, including historical redeployments.
+/// Each row represents one contract instance deployed at a specific ledger.
+model Deployment {
+  id         Int    @id @default(autoincrement())
+  type       String // registry | voucher | receipt
+  contractId String @unique
+  fromLedger Int
+  toLedger   Int?   // null means still active
+  createdAt  DateTime @default(now())
+
+  providers Provider[]
+  vouchers Voucher[]
+  receipts Receipt[]
+
+  @@index([type])
+}
+
 model Provider {
   address      String   @id
   name         String
@@ -22,6 +39,10 @@ model Provider {
   status       String   // Pending | Active | Suspended
   registeredAt DateTime
   updatedAt    DateTime @updatedAt
+
+  /// Which deployment this provider was registered under.
+  deployment Deployment? @relation(fields: [deploymentId], references: [id])
+  deploymentId Int?
 
   services Service[]
   vouchers Voucher[]
@@ -66,6 +87,10 @@ model Voucher {
   provider        Provider @relation(fields: [providerAddress], references: [address])
   providerAddress String
 
+  /// Which deployment this voucher was created under.
+  deployment Deployment? @relation(fields: [deploymentId], references: [id])
+  deploymentId Int?
+
   // Composite indexes for the list routes (issue #58). Each mirrors a real
   // filter + sort path in src/routes/vouchers.ts; the single-column indexes
   // they replace (funder, providerAddress, beneficiaryRef, status) were
@@ -98,6 +123,10 @@ model Receipt {
   serviceCode     Int
   amount          String
   settledAt       DateTime
+
+  /// Which deployment this receipt was settled under.
+  deployment Deployment? @relation(fields: [deploymentId], references: [id])
+  deploymentId Int?
 
   // GET /receipts lists one patient's or one clinic's history sorted by
   // settledAt desc (tie-broken by the voucherId primary key), and the same

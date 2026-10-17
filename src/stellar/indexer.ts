@@ -2,7 +2,12 @@ import type { Prisma } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
 
 import { prisma } from '../db.js';
-import { contractName, env, INDEXED_CONTRACTS } from '../env.js';
+import {
+  contractName,
+  env,
+  getAllDeployments,
+  INDEXED_CONTRACTS,
+} from '../env.js';
 import {
   eventsApplied,
   eventsSkipped,
@@ -171,6 +176,9 @@ export class Indexer {
   }
 
   async start(): Promise<void> {
+    // Initialize deployment tracking table from DEPLOYMENTS config.
+    await this.initializeDeployments();
+
     const state = await prisma.indexerState.findUnique({ where: { id: 1 } });
     if (!state) {
       const from =
@@ -188,6 +196,30 @@ export class Indexer {
     }
     this.holdsLease = await this.acquireLease();
     this.schedule();
+  }
+
+  /**
+   * Populate the Deployment table from DEPLOYMENTS config + current contracts.
+   * This is idempotent: existing rows are left alone, new ones are added.
+   */
+  private async initializeDeployments(): Promise<void> {
+    const deployments = getAllDeployments();
+    for (const dep of deployments) {
+      await prisma.deployment.upsert({
+        where: { contractId: dep.contractId },
+        create: {
+          type: dep.type,
+          contractId: dep.contractId,
+          fromLedger: dep.fromLedger,
+          toLedger: dep.toLedger ?? null,
+        },
+        update: {}, // Don't overwrite existing rows
+      });
+    }
+    this.log.info(
+      { count: deployments.length },
+      'deployment tracking initialized',
+    );
   }
 
   /**
@@ -253,6 +285,21 @@ export class Indexer {
     return work.finally(() => {
       if (this.inFlight === work) this.inFlight = null;
     });
+  }
+
+  /**
+   * Look up the deployment ID for a given contract ID.
+   * Returns null if the contract is not tracked in the Deployment table.
+   */
+  private async lookupDeploymentId(
+    contractId: string,
+    db: Db = prisma,
+  ): Promise<number | null> {
+    const deployment = await db.deployment.findUnique({
+      where: { contractId },
+      select: { id: true },
+    });
+    return deployment?.id ?? null;
   }
 
   /**
@@ -491,7 +538,7 @@ export class Indexer {
     const d = e.fields;
     switch (e.name) {
       case 'provider_registered':
-        await this.onProviderRegistered(db, d);
+        await this.onProviderRegistered(db, e);
         break;
       case 'provider_status_changed':
         await this.onProviderStatus(db, e);
@@ -509,7 +556,7 @@ export class Indexer {
         await this.onAdminChanged(db, e);
         break;
       case 'voucher_created':
-        await this.onVoucherCreated(db, d);
+        await this.onVoucherCreated(db, e);
         break;
       case 'voucher_claimed':
         await this.onVoucherStatus(db, d, 'Claimed', { claimedAt: asTimestamp(d.claimed_at) });
@@ -533,7 +580,7 @@ export class Indexer {
         await this.onVoucherStatus(db, d, 'Refunded', {});
         break;
       case 'receipt_minted':
-        await this.onReceiptMinted(db, d);
+        await this.onReceiptMinted(db, e);
         break;
       case 'dripped':
         await this.onDripped(db, e);
@@ -561,8 +608,12 @@ export class Indexer {
     );
   }
 
-  private async onProviderRegistered(db: Db, d: Record<string, unknown>): Promise<void> {
+  private async onProviderRegistered(db: Db, e: DecodedEvent): Promise<void> {
+    const d = e.fields;
     const address = asAddress(d.provider);
+    // Look up deployment ID from the contract ID in the event
+    const deploymentId = await this.lookupDeploymentId(e.contractId, db);
+
     await db.provider.upsert({
       where: { address },
       create: {
@@ -571,6 +622,7 @@ export class Indexer {
         country: String(d.country),
         status: 'Pending',
         registeredAt: asTimestamp(d.registered_at),
+        deploymentId,
       },
       update: { name: String(d.name), country: String(d.country) },
     });
@@ -668,7 +720,8 @@ export class Indexer {
     await db.service.updateMany({ where: { id }, data: { active: false } });
   }
 
-  private async onVoucherCreated(db: Db, d: Record<string, unknown>): Promise<void> {
+  private async onVoucherCreated(db: Db, e: DecodedEvent): Promise<void> {
+    const d = e.fields;
     const id = asId(d.voucher_id);
     const providerAddress = asAddress(d.provider);
 
@@ -686,6 +739,8 @@ export class Indexer {
       update: {},
     });
 
+    const deploymentId = await this.lookupDeploymentId(e.contractId, db);
+
     await db.voucher.upsert({
       where: { id },
       create: {
@@ -698,6 +753,7 @@ export class Indexer {
         status: 'Funded',
         createdAt: asTimestamp(d.created_at),
         expiresAt: asTimestamp(d.expires_at),
+        deploymentId,
       },
       update: {},
     });
@@ -715,7 +771,6 @@ export class Indexer {
       data: { status, ...extra },
     });
   }
-
   /**
    * Records one testnet faucet drip.
    *
@@ -739,8 +794,11 @@ export class Indexer {
     });
   }
 
-  private async onReceiptMinted(db: Db, d: Record<string, unknown>): Promise<void> {
+  private async onReceiptMinted(db: Db, e: DecodedEvent): Promise<void> {
+    const d = e.fields;
     const voucherId = asId(d.voucher_id);
+    const deploymentId = await this.lookupDeploymentId(e.contractId, db);
+
     await db.receipt.upsert({
       where: { voucherId },
       create: {
@@ -750,6 +808,7 @@ export class Indexer {
         serviceCode: asNumber(d.service_code),
         amount: asAmount(d.amount),
         settledAt: asTimestamp(d.settled_at),
+        deploymentId,
       },
       update: {},
     });

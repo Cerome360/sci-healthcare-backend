@@ -37,6 +37,13 @@ const schema = z.object({
   /** Testnet demo faucet. Drips are counted only when this is set. */
   FAUCET_CONTRACT_ID: z.string().length(56).optional(),
 
+  /**
+   * Optional JSON array of previous contract deployments for redeployment support.
+   * Each entry has {type, contractId, fromLedger, toLedger?}.
+   * When present, the indexer subscribes to ALL listed contracts.
+   */
+  DEPLOYMENTS: z.string().optional(),
+
   INDEXER_START_LEDGER: z.coerce.number().int().nonnegative().default(0),
   INDEXER_POLL_MS: z.coerce.number().int().positive().default(5000),
   /** Ceiling for the indexer's exponential backoff after RPC failures. */
@@ -130,10 +137,82 @@ function load(): Env {
   return { ...config, SOROBAN_RPC_URL: rpcUrls[0]!, RPC_URLS: rpcUrls };
 }
 
+/**
+ * A single contract deployment entry from the DEPLOYMENTS config.
+ */
+export type DeploymentEntry = {
+  type: 'registry' | 'voucher' | 'receipt';
+  contractId: string;
+  fromLedger: number;
+  toLedger?: number;
+};
+
+const deploymentSchema = z.array(
+  z.object({
+    type: z.enum(['registry', 'voucher', 'receipt']),
+    contractId: z.string().length(56),
+    fromLedger: z.number().int().nonnegative(),
+    toLedger: z.number().int().nonnegative().optional(),
+  }),
+);
+
 export const env = load();
 
 /** Every configured RPC endpoint, in failover order. */
 export const RPC_URLS = env.RPC_URLS;
+
+/**
+ * Parse DEPLOYMENTS JSON if present, otherwise empty array.
+ */
+function parseDeployments(): DeploymentEntry[] {
+  if (!env.DEPLOYMENTS) return [];
+  try {
+    const parsed = JSON.parse(env.DEPLOYMENTS);
+    const validated = deploymentSchema.parse(parsed);
+    // Strip undefined toLedger values to satisfy exactOptionalPropertyTypes
+    return validated.map((d) => ({
+      type: d.type,
+      contractId: d.contractId,
+      fromLedger: d.fromLedger,
+      ...(d.toLedger !== undefined ? { toLedger: d.toLedger } : {}),
+    }));
+  } catch (err) {
+    throw new Error(
+      `Invalid DEPLOYMENTS JSON: ${(err as Error).message}\n` +
+        'Expected format: [{"type":"registry","contractId":"C...","fromLedger":123}]',
+    );
+  }
+}
+
+const DEPLOYMENTS = parseDeployments();
+
+/**
+ * Returns all deployments, including the current one as the last entry.
+ */
+export function getAllDeployments(): DeploymentEntry[] {
+  // Add current deployment as the active ones (no toLedger means still active)
+  const current: DeploymentEntry[] = [
+    { type: 'registry', contractId: env.REGISTRY_CONTRACT_ID, fromLedger: 0 },
+    { type: 'voucher', contractId: env.VOUCHER_CONTRACT_ID, fromLedger: 0 },
+    { type: 'receipt', contractId: env.RECEIPT_CONTRACT_ID, fromLedger: 0 },
+  ];
+  return [...DEPLOYMENTS, ...current];
+}
+
+/**
+ * Map from contract ID to deployment index for quick lookup.
+ */
+const CONTRACT_TO_DEPLOYMENT_INDEX = new Map<string, number>();
+getAllDeployments().forEach((d, i) => {
+  CONTRACT_TO_DEPLOYMENT_INDEX.set(d.contractId, i);
+});
+
+/**
+ * Returns the deployment index for a given contract ID, or undefined if not found.
+ */
+export function deploymentIndexForContract(contractId: string): number | undefined {
+  return CONTRACT_TO_DEPLOYMENT_INDEX.get(contractId);
+}
 
 /**
  * Contract ids the indexer subscribes to, in one place.
@@ -141,12 +220,15 @@ export const RPC_URLS = env.RPC_URLS;
  * The faucet is only present on a testnet demo, so it joins the list when
  * `FAUCET_CONTRACT_ID` is set and is absent otherwise.
  */
-export const INDEXED_CONTRACTS: readonly string[] = [
-  env.REGISTRY_CONTRACT_ID,
-  env.VOUCHER_CONTRACT_ID,
-  env.RECEIPT_CONTRACT_ID,
-  ...(env.FAUCET_CONTRACT_ID ? [env.FAUCET_CONTRACT_ID] : []),
-];
+export const INDEXED_CONTRACTS = [
+  ...new Set([
+    env.REGISTRY_CONTRACT_ID,
+    env.VOUCHER_CONTRACT_ID,
+    env.RECEIPT_CONTRACT_ID,
+    ...(env.FAUCET_CONTRACT_ID ? [env.FAUCET_CONTRACT_ID] : []),
+    ...DEPLOYMENTS.map((d) => d.contractId),
+  ]),
+] as readonly string[];
 
 /**
  * The short name for each configured contract, used to group per-contract
@@ -162,6 +244,31 @@ export const CONTRACTS = [
   { contract: 'receipt', contractId: env.RECEIPT_CONTRACT_ID },
 ] as const;
 
+/**
+ * Map from contract ID to its type (registry/voucher/receipt).
+ * Includes both current and historical deployments.
+ */
+const CONTRACT_ID_TO_TYPE = new Map<string, string>([
+  [env.REGISTRY_CONTRACT_ID, 'registry'],
+  [env.VOUCHER_CONTRACT_ID, 'voucher'],
+  [env.RECEIPT_CONTRACT_ID, 'receipt'],
+  ...DEPLOYMENTS.map((d) => [d.contractId, d.type] as const),
+]);
+
 export function contractName(contractId: string): string {
-  return CONTRACTS.find((c) => c.contractId === contractId)?.contract ?? 'unknown';
+  return CONTRACT_ID_TO_TYPE.get(contractId) ?? 'unknown';
+}
+
+/**
+ * Returns all contract IDs for a given type across all deployments.
+ */
+export function contractIdsForType(type: 'registry' | 'voucher' | 'receipt'): string[] {
+  const ids: string[] = [];
+  // Add current deployment
+  if (type === 'registry') ids.push(env.REGISTRY_CONTRACT_ID);
+  else if (type === 'voucher') ids.push(env.VOUCHER_CONTRACT_ID);
+  else if (type === 'receipt') ids.push(env.RECEIPT_CONTRACT_ID);
+  // Add historical deployments
+  ids.push(...DEPLOYMENTS.filter((d) => d.type === type).map((d) => d.contractId));
+  return [...new Set(ids)];
 }
