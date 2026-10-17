@@ -6,6 +6,7 @@ import { fromBaseUnits } from '../lib/amounts.js';
 import { isPostgres } from '../lib/database.js';
 import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
 import { ApiError } from '../lib/errors.js';
+import { LIST_ROUTE_RATE_LIMIT } from '../lib/rate-limits.js';
 
 const listQuery = z.object({
   status: z.enum(['Pending', 'Active', 'Suspended']).optional(),
@@ -23,7 +24,7 @@ function nameContains(q: string): { contains: string; mode?: string } {
 }
 
 export async function providerRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/providers', async (req) => {
+  app.get('/providers', { config: { rateLimit: LIST_ROUTE_RATE_LIMIT } }, async (req) => {
     const parsed = listQuery.safeParse(req.query);
     if (!parsed.success) {
       throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);

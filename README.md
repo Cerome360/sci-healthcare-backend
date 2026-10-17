@@ -121,6 +121,15 @@ reference column**.
 
 `/receipts` requires an exact `beneficiaryRef`. Because that value is an HMAC under a key held by the patient, the endpoint cannot be walked to enumerate people.
 
+### Response behaviour
+
+List routes (`/vouchers`, `/vouchers/due`, `/providers`, `/receipts`) are limited to 30 requests
+per minute per client; other routes default to 120, while `/health` and `/ready`
+are exempt so a struggling service can always be probed. JSON above 1 KB is
+gzip-compressed when the client accepts it, and every response carries the
+standard `@fastify/helmet` security headers (no CSP — this API serves JSON, not
+HTML).
+
 ### Example
 
 ```bash

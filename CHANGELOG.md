@@ -40,6 +40,9 @@
 - **Indexer logs**: skipped events now include the transaction hash and ledger; an unknown event name is warned once per process instead of silently ignored.
 - **`IndexerState` schema**: two nullable columns added; `prisma db push` adds them in place (no backfill needed).
 
+### Fixed
+- **tests:** vitest now collects only `src/**/*.test.ts`. The `node:test` suite at `.github/scripts/automerge.test.cjs` has its own CI job, but was also being collected by vitest and failed `npm test` as "no test suite found".
+
 ## 0.2.0 — 2026-10-09
 
 ### Fixed
