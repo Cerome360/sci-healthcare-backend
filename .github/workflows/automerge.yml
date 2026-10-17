@@ -53,6 +53,11 @@ jobs:
             .github/**
           REQUEST_PAGES_BUILD: 'false'
         with:
+          # AUTOMERGE_TOKEN (optional) is a token allowed to write workflow
+          # files. Without it, GitHub refuses to let the built-in token merge
+          # a branch created before a workflow change on main, and its merges
+          # do not trigger other workflows.
+          github-token: ${{ secrets.AUTOMERGE_TOKEN || github.token }}
           script: |
             const run = require('./.github/scripts/automerge.cjs');
             await run({ github, context, core });
