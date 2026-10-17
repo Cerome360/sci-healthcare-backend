@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+- **Realistic local seed data** (#59): `npm run db:seed` (`prisma/seed.ts`, generation in `src/scripts/seed.ts`) writes deterministic fake clinics in every status, service catalogues, vouchers in all six lifecycle statuses and receipts for the settled ones into a reserved id space, so it can never clobber indexed rows or run against a production database (it refuses any `DATABASE_URL` that is not a SQLite file or a loopback Postgres). `SEED_VOUCHERS` scales the volume. Documented in `CONTRIBUTING.md`. Tests in `src/__tests__/seed.test.ts`.
+- **Composite indexes for the common list filters** (#58): `Voucher(funder, createdAt)`, `Voucher(funder, expiresAt)`, `Voucher(providerAddress, createdAt)`, `Voucher(providerAddress, expiresAt)`, `Voucher(beneficiaryRef, createdAt)`, `Voucher(status, createdAt)` and `Receipt(beneficiaryRef, settledAt)`, `Receipt(providerAddress, settledAt)` back the filter+sort paths of `GET /vouchers`, `GET /vouchers/due` and `GET /receipts`; the single-column indexes they strictly prefix are dropped. Added by migration `20260104000000_list_query_indexes`. No API behaviour change.
+
 ### Changed
 - **Versioned migrations**: production now applies reviewed migrations from `prisma/migrations/` with `prisma migrate deploy` instead of `db push --accept-data-loss`. `20260101000000_init` is the Postgres baseline of the previous schema and `20260102000000_failed_events` adds `FailedEvent`. A CI `migrations` job applies them to a fresh Postgres and fails if the schema and migrations drift. **Existing production databases must run `npx prisma migrate resolve --applied 20260101000000_init` once** (see README "Deploying").
 - **Batched indexer writes**: all events from one poll cycle are applied in a single transaction together with the cursor update, with a savepoint per event so a failing event rolls back only itself. A crash mid-cycle leaves the cursor unchanged.

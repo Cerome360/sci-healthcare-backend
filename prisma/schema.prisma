@@ -66,10 +66,28 @@ model Voucher {
   provider        Provider @relation(fields: [providerAddress], references: [address])
   providerAddress String
 
-  @@index([funder])
-  @@index([providerAddress])
-  @@index([beneficiaryRef])
-  @@index([status])
+  // Composite indexes for the list routes (issue #58). Each mirrors a real
+  // filter + sort path in src/routes/vouchers.ts; the single-column indexes
+  // they replace (funder, providerAddress, beneficiaryRef, status) were
+  // strict prefixes of these and were dropped. Postgres scans a two-column
+  // index backwards, so one index serves `order=asc|desc` for both the
+  // filtered count and the keyset page `(sortCol, id)` orders.
+  //
+  // GET /vouchers?funder=...        ORDER BY createdAt (default sort)
+  @@index([funder, createdAt])
+  // GET /vouchers?funder=...&sort=expiresAt and GET /vouchers/due?funder=...
+  // (status is filtered after the index range; keeping expiresAt last
+  // preserves the sort the route asks for).
+  @@index([funder, expiresAt])
+  // GET /vouchers?provider=...     ORDER BY createdAt
+  @@index([providerAddress, createdAt])
+  // GET /vouchers?provider=...&sort=expiresAt and GET /vouchers/due?provider=...
+  @@index([providerAddress, expiresAt])
+  // GET /vouchers?beneficiaryRef=... ORDER BY createdAt
+  @@index([beneficiaryRef, createdAt])
+  // GET /vouchers?status=... (single or comma-separated) and the
+  // `status: 'Settled'` scan behind GET /stats, each sorted by createdAt.
+  @@index([status, createdAt])
   @@index([expiresAt])
 }
 
@@ -81,8 +99,13 @@ model Receipt {
   amount          String
   settledAt       DateTime
 
-  @@index([beneficiaryRef])
-  @@index([providerAddress])
+  // GET /receipts lists one patient's or one clinic's history sorted by
+  // settledAt desc (tie-broken by the voucherId primary key), and the same
+  // predicate drives the count and the totalSpend aggregation on that
+  // route. These replace the single-column beneficiaryRef / providerAddress
+  // indexes they strictly prefix (issue #58).
+  @@index([beneficiaryRef, settledAt])
+  @@index([providerAddress, settledAt])
 }
 
 /// Every admin proposal and handover observed on each contract.

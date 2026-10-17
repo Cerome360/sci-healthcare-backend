@@ -24,6 +24,29 @@ npm run typecheck
 npm test
 ```
 
+### Seeding local data
+
+A fresh database is empty until the indexer catches up, which makes UI work
+slow. `npm run db:seed` fills it with deterministic fake data — clinics in
+each status, service catalogues, vouchers in every lifecycle status, and
+receipts for the settled ones — so every list route has something to show:
+
+```bash
+npm run db:seed                      # 12 clinics, ~2 500 vouchers
+SEED_VOUCHERS=100000 npm run db:seed # stress-sized seed for query-plan work
+```
+
+The seed is defined in `prisma/seed.ts` (entry) and `src/scripts/seed.ts`
+(data generation). Two guards keep it honest:
+
+- It **refuses to run** unless `DATABASE_URL` is a SQLite file or a Postgres
+  on `localhost`/`127.0.0.1`/`::1`. Fabricated rows are fine in a local
+  projection; everywhere else the read model must mirror the chain.
+- It only ever writes and deletes its own reserved id space (voucher ids
+  from 9 000 000 000 000, addresses prefixed `GSEED`), so it cannot clobber
+  indexed on-chain data. Re-running it resets those rows and ends on the
+  same state, at any voucher count.
+
 ### Checking the read model against the chain
 
 The database is a cache. `npm run indexer:reconcile` reads `get_voucher` for
