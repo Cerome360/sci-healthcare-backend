@@ -1,0 +1,58 @@
+# Automated dependency updates (issue #68).
+#
+# Weekly, small and grouped rather than rare and large. The auto-merge bot
+# merges a green update PR on its own, so anything that deserves a human look
+# first carries the `do-not-merge` label the bot already honours
+# (CONTRIBUTING.md, "How pull requests are merged").
+version: 2
+updates:
+  # Routine npm updates: one grouped PR a week, minor and patch only.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    # Prisma is handled by the entry below so it can carry its own label.
+    ignore:
+      - dependency-name: prisma
+      - dependency-name: "@prisma/client"
+    groups:
+      npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Prisma versions move together (CLI and client), and a schema or engine
+  # bump deserves a review even with green CI: labelled `do-not-merge` so the
+  # bot holds the PR until a maintainer looks at it.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(prisma)"
+    allow:
+      - dependency-name: prisma
+      - dependency-name: "@prisma/client"
+    labels:
+      - do-not-merge
+    groups:
+      prisma:
+        patterns:
+          - "*"
+
+  # Actions pinned in .github/workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

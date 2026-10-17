@@ -29,6 +29,7 @@
 - **`READY_MAX_LAG_LEDGERS`** (default `120`): lag in ledgers at which `/ready` reports degraded. The response echoes it as `checks.maxLagLedgers`.
 - **Split API and indexer entry points**: `npm run start:api` and `npm run start:indexer`; combined `npm start` stays the default. Commented two-service example in `render.yaml`.
 - **Indexer lease**: `IndexerState.leaseOwner` / `leaseExpiresAt` make the cursor single-writer. Standby instances log and retry instead of racing the cursor.
+- **Automated dependency updates**: `.github/dependabot.yml` opens one grouped npm PR a week (minor and patch) and one for GitHub Actions. Prisma updates arrive as their own PR labelled `do-not-merge`, so the auto-merge bot holds them until a maintainer has looked.
 
 ### Changed
 - **List endpoints**: Prefer `cursor`/`limit` over `offset`/`limit`. Offset pagination still works but returns a `Deprecation` header.
