@@ -11,11 +11,12 @@ on:
     workflows: [CI]
     types: [completed]
   pull_request_target:
-    # edited: re-check as soon as a contributor links an issue.
-    types: [edited, labeled, unlabeled, ready_for_review, reopened]
+    # opened/synchronize: approve the CI run GitHub holds for first-time
+    # contributors. edited: re-check as soon as a contributor links an issue.
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled, ready_for_review]
   schedule:
-    # Catches approvals and anything an event missed.
-    - cron: '17,47 * * * *'
+    # Backstop only: GitHub drops many scheduled runs under load.
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -32,7 +33,8 @@ concurrency:
 
 jobs:
   auto-merge:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request'
+    # Every run sweeps all open pull requests, so CI finishing anywhere
+    # (including on main) is a reason to look again.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

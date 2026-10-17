@@ -141,17 +141,66 @@ async function paginate(github, fn, params) {
   return github.paginate(fn, { ...params, per_page: 100 });
 }
 
-async function candidatePulls({ github, context }) {
+/**
+ * Every run evaluates every open pull request, whatever triggered it.
+ * Scheduled runs are often dropped by GitHub and queued runs can be
+ * superseded, so no pull request may depend on one particular run.
+ */
+async function openPulls({ github, context }) {
   const { owner, repo } = context.repo;
-  const open = await paginate(github, github.rest.pulls.list, { owner, repo, state: 'open' });
-  if (context.eventName === 'workflow_run') {
-    const sha = context.payload.workflow_run.head_sha;
-    return open.filter((p) => p.head.sha === sha);
+  return paginate(github, github.rest.pulls.list, { owner, repo, state: 'open' });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Approves CI runs that GitHub is holding for maintainer approval (pull
+ * requests from first-time contributors). Fork pull request runs get a
+ * read-only token and no secrets, so running them is safe; the merge
+ * decision still depends on their result.
+ */
+async function approvePendingRuns({ github, context, core, pulls }) {
+  const { owner, repo } = context.repo;
+  const shas = new Set(pulls.map((p) => p.head.sha));
+  if (shas.size === 0) return 0;
+
+  // A pull request that was just opened or pushed may not have its CI run
+  // yet; give GitHub a moment to create it.
+  const justPushed =
+    context.eventName === 'pull_request_target' &&
+    ['opened', 'reopened', 'synchronize'].includes(context.payload.action);
+  const attempts = justPushed ? 6 : 1;
+
+  let approved = 0;
+  const seen = new Set();
+  for (let i = 0; i < attempts; i++) {
+    const pending = await paginate(github, github.rest.actions.listWorkflowRunsForRepo, {
+      owner, repo, status: 'action_required',
+    });
+    for (const run of pending) {
+      if (seen.has(run.id) || !shas.has(run.head_sha)) continue;
+      if (run.event !== 'pull_request' && run.event !== 'pull_request_target') continue;
+      seen.add(run.id);
+      try {
+        await github.request('POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve', {
+          owner, repo, run_id: run.id,
+        });
+        approved++;
+        core.info(`approved ${run.name} run ${run.id} for ${run.head_sha.slice(0, 7)}`);
+      } catch (err) {
+        core.warning(`could not approve run ${run.id}: ${err.message}`);
+      }
+    }
+    if (justPushed && i < attempts - 1) {
+      const sha = context.payload.pull_request.head.sha;
+      const runs = await github.rest.actions.listWorkflowRunsForRepo({ owner, repo, head_sha: sha, per_page: 20 });
+      const ciExists = runs.data.workflow_runs.some((r) => r.path.endsWith('/ci.yml'));
+      const ciPending = runs.data.workflow_runs.some((r) => r.path.endsWith('/ci.yml') && r.conclusion === 'action_required' && !seen.has(r.id));
+      if (ciExists && !ciPending) break;
+      await sleep(10000);
+    }
   }
-  if (context.eventName === 'pull_request_target') {
-    return open.filter((p) => p.number === context.payload.pull_request.number);
-  }
-  return open;
+  return approved;
 }
 
 async function alreadyCommented({ github, owner, repo, number, key }) {
@@ -300,8 +349,10 @@ async function afterMerge({ github, context, core }) {
 
 async function run({ github, context, core }) {
   const patterns = parsePatterns(process.env.SENSITIVE_PATHS);
-  const pulls = await candidatePulls({ github, context });
+  const pulls = await openPulls({ github, context });
   core.info(`${pulls.length} pull request(s) to evaluate`);
+  const approved = await approvePendingRuns({ github, context, core, pulls });
+  if (approved) core.info(`approved ${approved} pending CI run(s)`);
   let merged = 0;
   for (const pr of pulls) {
     try {
