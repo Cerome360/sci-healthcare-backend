@@ -217,6 +217,11 @@ Suited to a platform that runs long-lived processes with a database attached, su
 - Switch `provider` in `prisma/schema.prisma` from `sqlite` to `postgresql`
 - Provision the database in the **same region** and use its internal connection string
 
+## Operations
+
+- **Metrics**: `GET /metrics` is Prometheus text (not rate limited). Alert on `indexer_lag_ledgers` and `indexer_seconds_since_success`; both are set by the process running the indexer.
+- **Failed events**: an event the indexer cannot project is stored in the `FailedEvent` table and `/ready` reports degraded until it is cleared. After fixing the cause, run `npm run indexer:retry-failed`; it exits non-zero while any event still fails.
+
 ## Contributing
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md). It documents the one trap this codebase has already hit: contract event fields marked `#[topic]` arrive in the topic list, not the data map, and reading them off the data map corrupts rows silently rather than crashing.

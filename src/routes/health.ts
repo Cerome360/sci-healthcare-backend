@@ -27,6 +27,11 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
     try {
       await prisma.$queryRaw`SELECT 1`;
       checks.database = 'ok';
+      // A failed event is missing data in the read model, so it is a
+      // degradation until someone retries or investigates it.
+      const failedEvents = await prisma.failedEvent.count();
+      checks.failedEvents = failedEvents;
+      if (failedEvents > 0) healthy = false;
     } catch (err) {
       healthy = false;
       checks.database = `error: ${(err as Error).message}`;

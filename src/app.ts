@@ -14,6 +14,7 @@ import {
 
 import { env } from './env.js';
 import { errorEnvelope } from './lib/errors.js';
+import { httpDuration, httpRequests, registry } from './lib/metrics.js';
 import { governanceRoutes } from './routes/governance.js';
 import { healthRoutes } from './routes/health.js';
 import { providerRoutes } from './routes/providers.js';
@@ -120,6 +121,30 @@ export async function buildApp(
   app.get('/openapi.json', { schema: { hide: true } }, async () => {
     return app.swagger();
   });
+
+  // Labelled by route pattern, not URL, so ids in paths cannot blow up the
+  // number of series. Unmatched requests share one label.
+  app.addHook('onResponse', async (req, reply) => {
+    if (req.routeOptions.url === '/metrics') return;
+    const labels = {
+      method: req.method,
+      route: req.routeOptions.url ?? 'unmatched',
+      status_code: String(reply.statusCode),
+    };
+    httpRequests.inc(labels);
+    httpDuration.observe(labels, reply.elapsedTime / 1000);
+  });
+
+  // Scraped by a monitoring system on a fixed interval, so it must not share
+  // the public per-IP budget.
+  app.get(
+    '/metrics',
+    { schema: { hide: true }, config: { rateLimit: false } },
+    async (_req, reply) => {
+      reply.header('content-type', registry.contentType);
+      return registry.metrics();
+    },
+  );
 
   // `/v1` is the canonical API. The unversioned paths stay as aliases for
   // clients already deployed against them, and say so on every response.
