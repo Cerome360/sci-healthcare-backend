@@ -21,9 +21,10 @@ services:
     region: oregon
     branch: main
     buildCommand: npm ci && ./scripts/use-postgres.sh && npx prisma generate && npm run build
-    # db push rather than migrate deploy: this repo has no migration history
-    # yet. Swapping to `prisma migrate deploy` is tracked as an open issue.
-    startCommand: npx prisma db push --skip-generate --accept-data-loss && npm start
+    # Schema changes ship as reviewed migrations in prisma/migrations and are
+    # applied here. An existing database created by `db push` needs the
+    # baseline marked as applied once; see README "Deploying".
+    startCommand: npm run db:migrate && npm start
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
@@ -80,8 +81,8 @@ services:
 #   region: oregon
 #   branch: main
 #   buildCommand: npm ci && ./scripts/use-postgres.sh && npx prisma generate && npm run build
-#   # The API owns schema pushes so the worker only ever reads.
-#   startCommand: npx prisma db push --skip-generate --accept-data-loss && npm run start:api
+#   # The API owns migrations so the worker only ever reads.
+#   startCommand: npm run db:migrate && npm run start:api
 #   healthCheckPath: /health
 #   envVars: ["...same as sci-healthcare-api above..."]
 #

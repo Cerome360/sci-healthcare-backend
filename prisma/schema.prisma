@@ -132,6 +132,27 @@ model ServicePriceChange {
   @@index([providerAddress, code, ledger])
 }
 
+/// An event the indexer could not project.
+///
+/// The cursor moves past a failing event so one bad payload cannot wedge the
+/// pipeline, which means the read model is missing that event. This table is
+/// what makes the omission durable and visible: `/ready` reports degraded
+/// while it is non-empty, and `npm run indexer:retry-failed` replays it.
+model FailedEvent {
+  id        String   @id // on-chain event id
+  name      String
+  ledger    Int
+  /// JSON of the raw RPC event with topics and value as base64 XDR, enough
+  /// to re-decode it after a decoder fix.
+  raw       String
+  error     String
+  attempts  Int      @default(1)
+  firstSeen DateTime
+  lastSeen  DateTime
+
+  @@index([ledger])
+}
+
 /// Single-row table tracking how far the indexer has replayed the ledger,
 /// and which process is currently allowed to advance it.
 ///

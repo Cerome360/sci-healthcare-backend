@@ -214,8 +214,34 @@ Suited to a platform that runs long-lived processes with a database attached, su
 - Runtime: Node 22
 - Build: `npm ci && npx prisma generate && npm run build`
 - Start: `npm run db:migrate && npm start` (or `npm run start:api` / `npm run start:indexer` when split)
-- Switch `provider` in `prisma/schema.prisma` from `sqlite` to `postgresql`
+- Run `./scripts/use-postgres.sh` before `prisma generate` to switch the schema from `sqlite` to `postgresql`
 - Provision the database in the **same region** and use its internal connection string
+
+### Schema changes and migrations
+
+Local development uses SQLite and `npx prisma db push`; nothing to do there. Production uses Postgres and **versioned migrations** in `prisma/migrations/`, applied on every start by `npm run db:migrate` (`prisma migrate deploy`).
+
+To change the schema:
+
+1. Edit `prisma/schema.prisma` (keep `provider = "sqlite"` in the committed file).
+2. Against a scratch Postgres, run `./scripts/use-postgres.sh`, then `npx prisma migrate dev --name <change>`, and restore the provider to `sqlite` (`git checkout -p prisma/schema.prisma`, or edit it back).
+3. Commit the new `prisma/migrations/<timestamp>_<change>/` directory with the schema change.
+
+CI applies every migration to a fresh Postgres and then runs `prisma migrate diff`, failing the build if the schema and the migrations disagree.
+
+**Existing database created with `db push`:** the first migration creates tables that already exist, so mark it as applied once, then deploy normally:
+
+```bash
+npx prisma migrate resolve --applied 20260101000000_init
+npm run db:migrate
+```
+
+A new, empty database needs nothing special.
+
+## Operations
+
+- **Metrics**: `GET /metrics` is Prometheus text (not rate limited). Alert on `indexer_lag_ledgers` and `indexer_seconds_since_success`; both are set by the process running the indexer.
+- **Failed events**: an event the indexer cannot project is stored in the `FailedEvent` table and `/ready` reports degraded until it is cleared. After fixing the cause, run `npm run indexer:retry-failed`; it exits non-zero while any event still fails.
 
 ## Contributing
 
