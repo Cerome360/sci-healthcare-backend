@@ -6,6 +6,9 @@
   <a href="https://github.com/Godgift-care/sci-healthcare-backend/actions/workflows/ci.yml">
     <img src="https://github.com/Godgift-care/sci-healthcare-backend/actions/workflows/ci.yml/badge.svg" alt="CI" />
   </a>
+  <a href="https://github.com/Godgift-care/sci-healthcare-backend/actions/workflows/monitor.yml">
+    <img src="https://github.com/Godgift-care/sci-healthcare-backend/actions/workflows/monitor.yml/badge.svg" alt="Uptime monitor" />
+  </a>
   <img src="https://img.shields.io/badge/node-22-green" alt="node 22" />
   <img src="https://img.shields.io/badge/fastify-5.12-black" alt="fastify" />
   <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="Apache 2.0" />
@@ -68,6 +71,8 @@ The cursor is guarded by a lease (stored on `IndexerState`). However many indexe
 When the RPC fails, the indexer backs off exponentially (with jitter, up to `INDEXER_BACKOFF_MAX_MS`) instead of retrying every poll interval, and reports the failure once per streak rather than once per attempt — retrying at full speed adds load exactly where it hurts and buries every other log line. Configure more than one endpoint in `SOROBAN_RPC_URLS` and repeated failures move reads to the next one; the active endpoint is logged on each switch and reported as `checks.rpcUrl` on `/ready`.
 
 On `SIGTERM` (every Render deploy) or `SIGINT`, the indexer stops scheduling new cycles, waits for the cycle in flight to commit its transaction and save the cursor (bounded by `SHUTDOWN_TIMEOUT_MS`), then releases the lease so the replacement instance can take over immediately. The process then closes the HTTP server and the database connection, with a hard exit as a backstop. If the cycle overruns the timeout the lease is deliberately left to expire rather than freed, so a peer cannot race a cycle that may still be committing.
+
+See [docs/architecture.md](docs/architecture.md) for the full walkthrough: the paging and decode stages, the cursor and lease model, idempotency rules, and each failure mode with what to do about it.
 
 ## API
 
@@ -185,27 +190,34 @@ npm run dev
 
 ## Environment
 
-| Variable | Purpose | Example |
-| --- | --- | --- |
-| `PORT` | HTTP port | `8080` |
-| `HOST` | Bind address | `0.0.0.0` |
-| `LOG_LEVEL` | pino level | `info` |
-| `CORS_ORIGIN` | Comma-separated allowed origins | `http://localhost:3000` |
-| `READY_MAX_LAG_LEDGERS` | Lag in ledgers at which `/ready` reports degraded | `120` |
-| `DATABASE_URL` | Resolved **relative to `prisma/`** | `file:./dev.db` |
-| `SOROBAN_RPC_URL` | Soroban RPC endpoint (used when `SOROBAN_RPC_URLS` is unset) | `https://soroban-testnet.stellar.org` |
-| `SOROBAN_RPC_URLS` | Comma-separated endpoints, tried in order on repeated failure | `https://rpc-a.example,https://rpc-b.example` |
-| `SOROBAN_RPC_MAX_FAILURES` | Consecutive failures against one endpoint before switching | `3` |
-| `NETWORK_PASSPHRASE` | Network passphrase | `Test SDF Network ; September 2015` |
-| `REGISTRY_CONTRACT_ID` | Registry contract | `CAMU635NRFEHATJ6MTY5SI43IAZ43KHPFXAQDQAST2AHKCHLSGWHVE4V` |
-| `VOUCHER_CONTRACT_ID` | Voucher escrow | `CBPUQN6CNJCNGPKNEXB7UM4T7RINKQB7HQI5CXEOSQ5EFRHE4G4VKPSQ` |
-| `RECEIPT_CONTRACT_ID` | Care receipts | `CBCJRI2BCZBMZNX77WWDC2NGSV4ZNAN5Q23XHYNBH6UTOQMPJHZGX5C7` |
-| `USDC_CONTRACT_ID` | Settlement token | `CCRLJ7FEIKTR3GBT3VQQPSIJGRBO2WPNMVFKJDP6AYGJQWECOR4QVE5M` |
-| `FAUCET_CONTRACT_ID` | Testnet demo faucet; optional, drips counted in `/stats` when set | `CCB25WG7DQ2CSNXPTOHZO2PDZ324FQPZLH3LSNCCLWYM3FEH52GEXC47` |
-| `INDEXER_START_LEDGER` | Ledger to index from; `0` means start at the tip | `4465529` |
-| `INDEXER_POLL_MS` | Poll interval | `5000` |
-| `INDEXER_BACKOFF_MAX_MS` | Ceiling for the backoff applied after RPC failures | `60000` |
-| `SHUTDOWN_TIMEOUT_MS` | How long SIGTERM/SIGINT waits for the indexer cycle in flight before the process hard-exits | `15000` |
+Every variable the service reads, in one table. The Zod schema in
+`src/env.ts` is the source of truth and the process refuses to start when a
+required variable is missing; `src/__tests__/env-docs.test.ts` fails when
+this table and the schema drift apart.
+
+| Variable | Required | Default | Example | What it does |
+| --- | --- | --- | --- | --- |
+| `PORT` | No | `8080` | `8080` | HTTP port the API listens on |
+| `HOST` | No | `0.0.0.0` | `0.0.0.0` | Address the API binds to |
+| `LOG_LEVEL` | No | `info` | `info` | pino log level: `fatal`, `error`, `warn`, `info`, `debug` or `trace` |
+| `CORS_ORIGIN` | No | `http://localhost:3000` | `https://sci-healthcare.vercel.app` | Comma-separated origins allowed to call the API |
+| `READY_MAX_LAG_LEDGERS` | No | `120` | `120` | Indexer lag in ledgers at which `/ready` reports degraded (503) |
+| `DATABASE_URL` | Yes | — | `file:./dev.db` | Database connection string. SQLite paths resolve **relative to `prisma/`**; production uses a Postgres URL |
+| `STELLAR_NETWORK` | No | `testnet` | `testnet` | Stellar network: `testnet`, `public` or `futurenet` |
+| `SOROBAN_RPC_URL` | No | — | `https://soroban-testnet.stellar.org` | Soroban RPC endpoint (used when `SOROBAN_RPC_URLS` is unset) |
+| `SOROBAN_RPC_URLS` | No | — | `https://rpc-a.example,https://rpc-b.example` | Comma-separated endpoints, tried in order on repeated failure |
+| `SOROBAN_RPC_MAX_FAILURES` | No | `3` | `3` | Consecutive failures against one endpoint before switching |
+| `NETWORK_PASSPHRASE` | Yes | — | `Test SDF Network ; September 2015` | Network passphrase used when building contract-read simulations |
+| `REGISTRY_CONTRACT_ID` | Yes | — | `CAMU635NRFEHATJ6MTY5SI43IAZ43KHPFXAQDQAST2AHKCHLSGWHVE4V` | Clinic registry contract id; indexed for providers and admin history |
+| `VOUCHER_CONTRACT_ID` | Yes | — | `CBPUQN6CNJCNGPKNEXB7UM4T7RINKQB7HQI5CXEOSQ5EFRHE4G4VKPSQ` | Voucher escrow contract id; indexed for vouchers |
+| `RECEIPT_CONTRACT_ID` | Yes | — | `CBCJRI2BCZBMZNX77WWDC2NGSV4ZNAN5Q23XHYNBH6UTOQMPJHZGX5C7` | Care-receipt contract id; indexed for minted receipts |
+| `USDC_CONTRACT_ID` | No | — | `CCRLJ7FEIKTR3GBT3VQQPSIJGRBO2WPNMVFKJDP6AYGJQWECOR4QVE5M` | Optional settlement-token (USDC) contract id, validated when set |
+| `FAUCET_CONTRACT_ID` | No | — | `CCB25WG7DQ2CSNXPTOHZO2PDZ324FQPZLH3LSNCCLWYM3FEH52GEXC47` | Testnet demo faucet; optional, drips counted in `/stats` when set |
+| `DEPLOYMENTS` | No | — | `[{"type":"registry","contractId":"C...","fromLedger":123}]` | Optional JSON array of previous contract deployments for redeployment support |
+| `INDEXER_START_LEDGER` | No | `0` | `4465529` | Ledger to index from; `0` means start at the current tip and skip prior history |
+| `INDEXER_POLL_MS` | No | `5000` | `5000` | Milliseconds between indexer polls once caught up |
+| `INDEXER_BACKOFF_MAX_MS` | No | `60000` | `60000` | Ceiling for the backoff applied after RPC failures |
+| `SHUTDOWN_TIMEOUT_MS` | No | `15000` | `15000` | How long SIGTERM/SIGINT waits for the indexer cycle in flight before the process hard-exits |
 
 Set `INDEXER_START_LEDGER` to the deployment ledger. Leaving it at `0` starts at the current tip and silently skips all prior history. Soroban RPC also only retains a rolling window of ledgers (about 7 days on testnet) — an indexer that falls further behind than the window cannot catch up, and `/ready` will say so rather than pretend otherwise.
 

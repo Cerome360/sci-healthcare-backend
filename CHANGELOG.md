@@ -45,6 +45,9 @@
 - **Split API and indexer entry points**: `npm run start:api` and `npm run start:indexer`; combined `npm start` stays the default. Commented two-service example in `render.yaml`.
 - **Indexer lease**: `IndexerState.leaseOwner` / `leaseExpiresAt` make the cursor single-writer. Standby instances log and retry instead of racing the cursor.
 - **Automated dependency updates**: `.github/dependabot.yml` opens one grouped npm PR a week (minor and patch) and one for GitHub Actions. Prisma updates arrive as their own PR labelled `do-not-merge`, so the auto-merge bot holds them until a maintainer has looked.
+- **CodeQL analysis**: `.github/workflows/codeql.yml` analyses JavaScript/TypeScript on pull requests into `main`, weekly and on demand, uploading results to code scanning. `src/__tests__/ci-workflows.test.ts` asserts the workflow keeps its triggers, permissions and actions.
+- **Uptime monitoring**: `.github/workflows/monitor.yml` probes the deployed `/ready` every 30 minutes, retrying so Render free-tier cold starts do not fail the run, and its badge is in the README. `docs/RUNBOOK.md` documents the free UptimeRobot setup, the alert contact and why `/ready` is the endpoint to watch rather than `/health`.
+- **`docs/architecture.md`**: the indexer pipeline from RPC to API — paging and decoding, the cursor and lease model, idempotency rules and failure modes — linked from the README and `CONTRIBUTING.md`.
 
 ### Changed
 - **`/stats` response**: two new fields, `faucetDrips` and `faucetWallets`. Existing fields are unchanged.
@@ -57,6 +60,7 @@
 - **GET /vouchers**: Status filter now accepts comma-separated values (e.g., `Claimed,Attested`) instead of a single value.
 - **Indexer logs**: skipped events now include the transaction hash and ledger; an unknown event name is warned once per process instead of silently ignored.
 - **`IndexerState` schema**: two nullable columns added; `prisma db push` adds them in place (no backfill needed).
+- **README environment reference**: the Environment table now documents every variable `src/env.ts` accepts, with Required, Default, Example and description columns; `STELLAR_NETWORK` was missing. `src/__tests__/env-docs.test.ts` fails when the table and the schema drift apart.
 
 ### Fixed
 - **tests:** vitest now collects only `src/**/*.test.ts`. The `node:test` suite at `.github/scripts/automerge.test.cjs` has its own CI job, but was also being collected by vitest and failed `npm test` as "no test suite found".
