@@ -30,6 +30,16 @@ const schema = z.object({
   INDEXER_POLL_MS: z.coerce.number().int().positive().default(5000),
 });
 
+/**
+ * Expected network passphrases for each STELLAR_NETWORK value.
+ * These match the Stellar SDK Networks constants.
+ */
+const EXPECTED_PASSPHRASES: Record<string, string> = {
+  testnet: 'Test SDF Network ; September 2015',
+  public: 'Public Global Stellar Network ; September 2015',
+  futurenet: 'Test SDF Future Network ; October 2022',
+};
+
 export type Env = z.infer<typeof schema>;
 
 function load(): Env {
@@ -43,7 +53,22 @@ function load(): Env {
         'Copy .env.example to .env and fill in the contract ids printed by scripts/deploy.sh.',
     );
   }
-  return parsed.data;
+
+  const config = parsed.data;
+
+  // Validate that NETWORK_PASSPHRASE matches STELLAR_NETWORK at startup.
+  // A mismatched passphrase means the backend would query the wrong chain.
+  const expectedPassphrase = EXPECTED_PASSPHRASES[config.STELLAR_NETWORK];
+  if (expectedPassphrase && config.NETWORK_PASSPHRASE !== expectedPassphrase) {
+    throw new Error(
+      `NETWORK_PASSPHRASE mismatch for ${config.STELLAR_NETWORK}:\n` +
+        `  Expected: ${expectedPassphrase}\n` +
+        `  Got:      ${config.NETWORK_PASSPHRASE}\n\n` +
+        'Fix your .env file so the passphrase matches the chosen network.',
+    );
+  }
+
+  return config;
 }
 
 export const env = load();
