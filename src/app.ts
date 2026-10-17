@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 
+import compress from '@fastify/compress';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
@@ -21,6 +22,7 @@ import { providerRoutes } from './routes/providers.js';
 import { receiptRoutes } from './routes/receipts.js';
 import { serviceRoutes } from './routes/services.js';
 import { voucherRoutes } from './routes/vouchers.js';
+import { DEFAULT_RATE_LIMIT } from './lib/rate-limits.js';
 
 /**
  * Request ids are opaque, bounded and safe to put in a log line. Anything
@@ -92,6 +94,8 @@ export async function buildApp(
     methods: ['GET'],
   });
 
+  await app.register(compress);
+  await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(rateLimit, DEFAULT_RATE_LIMIT);
 
   // Every response, including errors and 404s, carries the id that appears

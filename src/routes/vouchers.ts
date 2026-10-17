@@ -117,6 +117,7 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
         maxAmount,
         sort,
         order,
+        cursor,
         limit,
         offset,
       } = parsed.data;

@@ -24,14 +24,28 @@ const REGISTRY = CONTRACTS.find((c) => c.contract === 'registry')!.contractId;
 const VOUCHER = CONTRACTS.find((c) => c.contract === 'voucher')!.contractId;
 
 let app: FastifyInstance;
+let testClientId = 0;
+
+function nextTestClientIp(): string {
+  const id = ++testClientId;
+  return `10.${(id >>> 16) & 255}.${(id >>> 8) & 255}.${id & 255}`;
+}
 
 async function get(url: string) {
-  const res = await app.inject({ method: 'GET', url });
+  const res = await app.inject({
+    method: 'GET',
+    url,
+    headers: { 'x-forwarded-for': nextTestClientIp() },
+  });
   return { status: res.statusCode, body: res.json() };
 }
 
 async function getCsv(url: string) {
-  const res = await app.inject({ method: 'GET', url });
+  const res = await app.inject({
+    method: 'GET',
+    url,
+    headers: { 'x-forwarded-for': nextTestClientIp() },
+  });
   return { status: res.statusCode, body: res.body, headers: res.headers, json: () => res.json() };
 }
 
@@ -1140,7 +1154,10 @@ describe('response hardening', () => {
     const res = await app.inject({
       method: 'GET',
       url: `/vouchers?funder=${FUNDER}`,
-      headers: { 'accept-encoding': 'gzip' },
+      headers: {
+        'accept-encoding': 'gzip',
+        'x-forwarded-for': nextTestClientIp(),
+      },
     });
     expect(res.headers['content-encoding']).toBe('gzip');
     const body = JSON.parse(gunzipSync(res.rawPayload).toString('utf8'));

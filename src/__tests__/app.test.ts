@@ -140,7 +140,8 @@ describe('error envelope', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json()).toEqual({
       error: 'filter_required',
-      message: 'Provide at least one of: funder, provider, beneficiaryRef, status',
+      message:
+        'Provide at least one of: funder, provider, beneficiaryRef, status, createdFrom, createdTo, minAmount, maxAmount',
     });
   });
 
