@@ -3,11 +3,12 @@
 ## Unreleased
 
 ### Changed
+- **Versioned migrations**: production now applies reviewed migrations from `prisma/migrations/` with `prisma migrate deploy` instead of `db push --accept-data-loss`. `20260101000000_init` is the Postgres baseline of the previous schema and `20260102000000_failed_events` adds `FailedEvent`. A CI `migrations` job applies them to a fresh Postgres and fails if the schema and migrations drift. **Existing production databases must run `npx prisma migrate resolve --applied 20260101000000_init` once** (see README "Deploying").
 - **Batched indexer writes**: all events from one poll cycle are applied in a single transaction together with the cursor update, with a savepoint per event so a failing event rolls back only itself. A crash mid-cycle leaves the cursor unchanged.
 
 ### Added
 - **Prometheus metrics**: `/metrics` serves Prometheus text with default process metrics, `indexer_lag_ledgers`, `indexer_seconds_since_success`, `events_applied_total{name}`, `events_skipped_total{name}`, and `http_requests_total` / `http_request_duration_seconds` labelled by route pattern. It is exempt from the public rate limit. Indexer series are populated in the process that runs the indexer (combined mode or the worker).
-- **Dead-lettered events**: an event that fails to project is stored in the new `FailedEvent` table (id, name, ledger, raw XDR, error, attempts, first/last seen) instead of only being logged. `/ready` reports degraded while any exist (`checks.failedEvents`). `npm run indexer:retry-failed` re-decodes and re-applies them, deleting rows that succeed. The table is created by `prisma db push` on deploy.
+- **Dead-lettered events**: an event that fails to project is stored in the new `FailedEvent` table (id, name, ledger, raw XDR, error, attempts, first/last seen) instead of only being logged. `/ready` reports degraded while any exist (`checks.failedEvents`). `npm run indexer:retry-failed` re-decodes and re-applies them, deleting rows that succeed. The table is created by the `20260102000000_failed_events` migration.
 - **OpenAPI spec and Swagger UI**: `@fastify/swagger` generates the spec from Zod schemas. Served at `/docs` (Swagger UI) and `/openapi.json` (raw spec). Amount fields documented as decimal strings.
 - **Cursor pagination**: All list endpoints accept `cursor` and `limit`. Responses carry `nextCursor` (null when exhausted). Cursors encode `(createdAt, id)` as base64url. Offset pagination kept with a `Deprecation` header for one release.
 - **RPC retention gap detection**: The indexer detects when its cursor falls outside the RPC retention window, marks itself degraded (`gap` flag in `IndexerState`), and `/ready` returns 503 with gap details and a pointer to `docs/RUNBOOK.md`.

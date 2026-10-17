@@ -61,6 +61,38 @@ jobs:
       - run: npx prisma generate
       - run: npm run build
 
+  migrations:
+    name: migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: ./scripts/use-postgres.sh
+      # A fresh database must migrate cleanly...
+      - run: npx prisma migrate deploy
+      # ...and end up exactly where the schema says. Exit code 2 means the
+      # schema changed without a migration.
+      - run: npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
+
   bot:
     name: auto-merge bot tests
     runs-on: ubuntu-latest
