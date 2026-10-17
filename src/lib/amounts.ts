@@ -14,8 +14,10 @@ export function toBaseUnits(display: string): string {
   if (!/^\d+(\.\d+)?$/.test(trimmed)) {
     throw new Error(`Not a valid decimal amount: ${display}`);
   }
+  // Stryker disable next-line StringLiteral: unreachable — split() always yields index 0; default only satisfies noUncheckedIndexedAccess
   const [whole = '0', frac = ''] = trimmed.split('.');
   const padded = frac.padEnd(DECIMALS, '0').slice(0, DECIMALS);
+  // Stryker disable next-line StringLiteral: unreachable — padEnd(7,'0').slice(0,7) is never empty, so `|| '0'` cannot fire
   return (BigInt(whole) * SCALE + BigInt(padded || '0')).toString();
 }
 

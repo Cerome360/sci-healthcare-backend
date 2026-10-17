@@ -14,13 +14,33 @@ describe('amounts', () => {
     expect(fromBaseUnits(toBaseUnits('12.3456789'))).toBe('12.3456789');
   });
 
+  it('pads a short fraction to full precision', () => {
+    expect(toBaseUnits('1.5')).toBe('15000000');
+  });
+
+  it('tolerates surrounding whitespace', () => {
+    expect(toBaseUnits(' 3.00 ')).toBe('30000000');
+  });
+
+  it('formats zero', () => {
+    expect(fromBaseUnits('0')).toBe('0.0000000');
+  });
+
+  it('keeps the sign for negative amounts', () => {
+    expect(fromBaseUnits('-1')).toBe('-0.0000001');
+    expect(fromBaseUnits('-30000000')).toBe('-3.0000000');
+  });
+
   it('truncates beyond seven decimals rather than rounding up', () => {
     expect(toBaseUnits('1.99999999')).toBe('19999999');
   });
 
-  it('rejects malformed input', () => {
-    expect(() => toBaseUnits('abc')).toThrow();
-    expect(() => toBaseUnits('')).toThrow();
+  it('rejects malformed input with its own error, not a BigInt accident', () => {
+    expect(() => toBaseUnits('abc')).toThrow(/Not a valid decimal amount/);
+    expect(() => toBaseUnits('')).toThrow(/Not a valid decimal amount/);
+    // Matches an anchorless version of the validation regex; must not slip through.
+    expect(() => toBaseUnits('a3')).toThrow(/Not a valid decimal amount/);
+    expect(() => toBaseUnits('3x')).toThrow(/Not a valid decimal amount/);
   });
 
   it('computes basis-point fees exactly as the contract does', () => {
