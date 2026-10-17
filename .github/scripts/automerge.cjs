@@ -239,8 +239,10 @@ async function handle({ github, context, core, pr, patterns }) {
   const { owner, repo } = context.repo;
   // Re-read: list results do not include mergeability.
   let full = (await github.rest.pulls.get({ owner, repo, pull_number: pr.number })).data;
-  for (let i = 0; i < 3 && full.mergeable === null; i++) {
-    await new Promise((r) => setTimeout(r, 3000));
+  // GitHub computes mergeability in the background, slowly after a busy
+  // stretch of merges; wait up to ~30s before leaving it to the next run.
+  for (let i = 0; i < 6 && full.mergeable === null; i++) {
+    await new Promise((r) => setTimeout(r, 5000));
     full = (await github.rest.pulls.get({ owner, repo, pull_number: pr.number })).data;
   }
   const sha = full.head.sha;
