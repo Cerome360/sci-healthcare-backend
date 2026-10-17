@@ -9,6 +9,11 @@ import {
   INDEXED_CONTRACTS,
 } from '../env.js';
 import {
+  hasStreamListeners,
+  publishVoucherSignals,
+  type VoucherSignal,
+} from '../lib/event-bus.js';
+import {
   eventsApplied,
   eventsSkipped,
   indexerLagLedgers,
@@ -31,6 +36,25 @@ import { IndexerLease } from './lease.js';
 import { collectEvents } from './paging.js';
 
 type Db = Prisma.TransactionClient;
+
+/**
+ * A committed voucher event waiting to be handed to the open streams.
+ *
+ * Shaped like `VoucherSignal` except that the clinic may still be unknown:
+ * `voucher_attested`, `voucher_disputed` and `voucher_refunded` put an
+ * attester or a funder in their topic and not the provider, so the address is
+ * read back from the row the handler just wrote (see `TOPIC_FIELDS` in
+ * `src/stellar/events.ts`).
+ */
+type PendingSignal = {
+  type: string;
+  voucherId: string;
+  status: string;
+  providerAddress: string | null;
+  ledger: number;
+  txHash: string;
+  at: Date;
+};
 
 /**
  * Contract events that are known but deliberately not part of the read
@@ -417,6 +441,70 @@ export class Indexer {
     }
   }
 
+  /**
+   * Hands a committed batch to the live streams.
+   *
+   * Runs after the transaction, never inside it: a stream that told a client
+   * about a status the cycle then rolled back would be worse than no stream at
+   * all, and would be a claim the read model cannot support.
+   *
+   * Returns early when nothing is watching, which is every run of the indexer
+   * as a separate process and every backfill, so those stay free of the extra
+   * read below. When some event did not carry its clinic, one batched query
+   * resolves all of them — never one per event.
+   *
+   * A voucher that is not in the read model at all is not published. That is
+   * the case when its `voucher_created` was never indexed, so the status
+   * update matched no row: the stream reports the projection, and pushing a
+   * status for a voucher no route can serve would be a lie.
+   */
+  private async publish(pending: readonly PendingSignal[]): Promise<void> {
+    if (!hasStreamListeners()) return;
+
+    const unresolved = [
+      ...new Set(pending.filter((p) => p.providerAddress === null).map((p) => p.voucherId)),
+    ];
+    let providerById = new Map<string, string>();
+    if (unresolved.length > 0) {
+      const rows = await prisma.voucher.findMany({
+        where: { id: { in: unresolved } },
+        select: { id: true, providerAddress: true },
+      });
+      providerById = new Map(rows.map((r) => [r.id, r.providerAddress]));
+    }
+
+    const signals: VoucherSignal[] = [];
+    for (const p of pending) {
+      const providerAddress = p.providerAddress ?? providerById.get(p.voucherId);
+      if (!providerAddress) continue;
+      signals.push({
+        type: p.type,
+        voucherId: p.voucherId,
+        providerAddress,
+        status: p.status,
+        ledger: p.ledger,
+        txHash: p.txHash,
+        at: p.at.toISOString(),
+      });
+    }
+    publishVoucherSignals(signals);
+  }
+
+  /**
+   * Publishes after a cycle that committed, and never breaks one.
+   *
+   * The events are already in the database and the cursor has already moved,
+   * so a stream that cannot be served must not be reported as an indexing
+   * failure: that would back the indexer off, dirty `/ready` and hide the fact
+   * that the read model is fine.
+   */
+  private publishCommitted(pending: readonly PendingSignal[]): Promise<void> {
+    if (pending.length === 0) return Promise.resolve();
+    return this.publish(pending).catch((err: unknown) => {
+      this.log.warn({ err, events: pending.length }, 'live stream update failed');
+    });
+  }
+
   private async poll(): Promise<number> {
     // Reset first: any early return below means no backlog was detected.
     this.hasMore = false;
@@ -463,6 +551,8 @@ export class Indexer {
     const advanceTo = Math.max(state.lastLedger, throughLedger);
     const appliedByName = new Map<string, number>();
     const skippedByName = new Map<string, number>();
+    /** Voucher events that committed, kept aside until the transaction ends. */
+    const pending: PendingSignal[] = [];
     let applied = 0;
 
     // The whole cycle commits together with the cursor: a crash anywhere
@@ -475,9 +565,10 @@ export class Indexer {
           if (!decoded) continue;
           await tx.$executeRawUnsafe('SAVEPOINT event');
           try {
-            await this.project(decoded, tx);
+            const signal = await this.project(decoded, tx);
             await tx.$executeRawUnsafe('RELEASE SAVEPOINT event');
             applied += 1;
+            if (signal) pending.push(signal);
             appliedByName.set(decoded.name, (appliedByName.get(decoded.name) ?? 0) + 1);
           } catch (err) {
             await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT event');
@@ -516,6 +607,8 @@ export class Indexer {
     indexerLagLedgers.set(Math.max(0, health.latestLedger - advanceTo));
     markIndexerSuccess();
 
+    await this.publishCommitted(pending);
+
     if (applied > 0) {
       this.log.info({ applied, throughLedger: advanceTo }, 'indexed events');
     }
@@ -530,67 +623,151 @@ export class Indexer {
    */
   async applyEvent(e: DecodedEvent): Promise<void> {
     // Handlers write several rows; one transaction keeps an event atomic.
-    await prisma.$transaction((tx) => this.project(e, tx));
+    const pending = await prisma.$transaction((tx) => this.project(e, tx));
+    if (pending) await this.publishCommitted([pending]);
   }
 
-  /** Applies one event using `db`, which is the poll cycle's transaction. */
-  private async project(e: DecodedEvent, db: Db): Promise<void> {
+  /**
+   * Applies one event using `db`, which is the poll cycle's transaction.
+   *
+   * Returns the voucher event's stream signal — what this process should tell
+   * live clients once the transaction has committed — and `null` for anything
+   * that is not a voucher state change. Nothing is published here: the caller
+   * holds the transaction, and only it knows whether the writes survive.
+   */
+  private async project(e: DecodedEvent, db: Db): Promise<PendingSignal | null> {
     const d = e.fields;
     switch (e.name) {
       case 'provider_registered':
         await this.onProviderRegistered(db, e);
-        break;
+        return null;
       case 'provider_status_changed':
         await this.onProviderStatus(db, e);
-        break;
+        return null;
       case 'service_upserted':
         await this.onServiceUpserted(db, e);
-        break;
+        return null;
       case 'service_removed':
         await this.onServiceRemoved(db, d);
-        break;
+        return null;
       case 'admin_proposed':
         await this.onAdminProposed(db, e);
-        break;
+        return null;
       case 'admin_changed':
         await this.onAdminChanged(db, e);
-        break;
+        return null;
       case 'voucher_created':
         await this.onVoucherCreated(db, e);
-        break;
+        return this.voucherSignal(e, 'Funded', this.topicProvider(e));
       case 'voucher_claimed':
-        await this.onVoucherStatus(db, d, 'Claimed', { claimedAt: asTimestamp(d.claimed_at) });
-        break;
+        return this.voucherStatus(
+          db,
+          e,
+          'Claimed',
+          { claimedAt: asTimestamp(d.claimed_at) },
+          this.topicProvider(e),
+        );
       case 'voucher_attested':
-        await this.onVoucherStatus(db, d, 'Attested', {
-          attestedAt: asTimestamp(d.attested_at),
-          disputeDeadline: asTimestamp(d.dispute_deadline),
-        });
-        break;
+        // The topic carries the attester, not the clinic.
+        return this.voucherStatus(
+          db,
+          e,
+          'Attested',
+          {
+            attestedAt: asTimestamp(d.attested_at),
+            disputeDeadline: asTimestamp(d.dispute_deadline),
+          },
+          null,
+        );
       case 'voucher_disputed':
-        await this.onVoucherStatus(db, d, 'Disputed', { disputeReason: asNumber(d.reason_code) });
-        break;
+        // The topic carries the funder.
+        return this.voucherStatus(
+          db,
+          e,
+          'Disputed',
+          { disputeReason: asNumber(d.reason_code) },
+          null,
+        );
       case 'voucher_settled':
-        await this.onVoucherStatus(db, d, 'Settled', {
-          settledNet: asAmount(d.net),
-          settledFee: asAmount(d.fee),
-        });
-        break;
+        return this.voucherStatus(
+          db,
+          e,
+          'Settled',
+          { settledNet: asAmount(d.net), settledFee: asAmount(d.fee) },
+          this.topicProvider(e),
+        );
       case 'voucher_refunded':
-        await this.onVoucherStatus(db, d, 'Refunded', {});
-        break;
+        // The topic carries the funder.
+        return this.voucherStatus(db, e, 'Refunded', {}, null);
       case 'receipt_minted':
         await this.onReceiptMinted(db, e);
-        break;
+        // Not published: the settlement it follows is already on the stream,
+        // and this event's payload includes the beneficiary reference.
+        return null;
       case 'dripped':
         await this.onDripped(db, e);
-        break;
+        return null;
       default:
         // Known-but-unprojected events stay silent; anything else is a name
         // this backend has never seen and is reported once per process.
         this.noteUnknown(e);
-        break;
+        return null;
     }
+  }
+
+  /**
+   * The clinic in an event's topic, or `null` when it is not a usable address.
+   *
+   * Deliberately not `asAddress`. That one throws, and the stream is a reader
+   * of what the projection decided — it must never be the reason an event the
+   * indexer used to apply starts dead-lettering. `voucher_claimed` and
+   * `voucher_settled` name their provider in the topic and never read it in
+   * the handler, so a malformed topic used to be harmless here; now it just
+   * sends the signal through the same read-from-the-row fallback an attestation
+   * already uses. `publish` resolves it, and the stream simply reports what the
+   * read model says.
+   */
+  private topicProvider(e: DecodedEvent): string | null {
+    const raw = e.fields.provider;
+    return typeof raw === 'string' && raw.length === 56 ? raw : null;
+  }
+
+  /**
+   * The stream signal for one voucher event.
+   *
+   * `asId(d.voucher_id)` is already how the handler picked the row, so by the
+   * time this runs the field has decoded once and cannot fail here.
+   */
+  private voucherSignal(
+    e: DecodedEvent,
+    status: string,
+    providerAddress: string | null,
+  ): PendingSignal {
+    return {
+      type: e.name,
+      voucherId: asId(e.fields.voucher_id),
+      status,
+      providerAddress,
+      ledger: e.ledger,
+      txHash: e.txHash,
+      at: e.ledgerClosedAt,
+    };
+  }
+
+  /**
+   * Applies a status transition and returns its stream signal in one step, so
+   * the row that commits and the update that follows it cannot disagree about
+   * which status an event was.
+   */
+  private async voucherStatus(
+    db: Db,
+    e: DecodedEvent,
+    status: string,
+    extra: Record<string, unknown>,
+    providerAddress: string | null,
+  ): Promise<PendingSignal> {
+    await this.onVoucherStatus(db, e.fields, status, extra);
+    return this.voucherSignal(e, status, providerAddress);
   }
 
   private noteUnknown(e: DecodedEvent): void {

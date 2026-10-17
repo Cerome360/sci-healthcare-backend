@@ -13,6 +13,8 @@ import { server } from '../stellar/client.js';
 const CLINIC = 'GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK';
 const SECOND_CLINIC = 'GCMDQZBBTZBR3ZDPCEFSDNNWVQFA44VHOJHR2JZTL7CHJHZ3N2LQDW3B';
 const PENDING_CLINIC = 'GBWBYKGC5OCRELVP5WHAKEMBSZMNUY3HOKVSYBQGLFNWWQHNH2SD53FZ';
+/** An address that appears on a receipt but never registered (`#51`). */
+const UNREGISTERED_CLINIC = `G${'U'.repeat(55)}`;
 const FUNDER = 'GDUPJTF3PNSYJ73WWLNTYLG6UXN7HHBKCGFEEMDFMWKWGR3UMQT3JG45';
 const ADMIN = 'A'.repeat(56);
 const NEW_ADMIN = 'B'.repeat(56);
@@ -1007,6 +1009,84 @@ describe('GET /receipts', () => {
     expect(s2).toBe(400);
     expect(b2.error).toBe('invalid_query');
   });
+
+  // #51 — an address is what the chain records; the clinic name is what a
+  // patient recognises when they look at a receipt.
+  it('names the clinic that issued each receipt', async () => {
+    const { body } = await get(`/receipts?beneficiaryRef=${REF}`);
+    expect(body.receipts).toHaveLength(2);
+    for (const receipt of body.receipts as { provider: unknown }[]) {
+      expect(receipt.provider).toEqual({
+        address: CLINIC,
+        name: 'Ikeja General Clinic',
+        country: 'NG',
+      });
+    }
+    // Kept for clients already reading it; the object is additive.
+    expect(body.receipts[0].providerAddress).toBe(CLINIC);
+  });
+
+  it('names the clinic in the provider view too', async () => {
+    const { body } = await get(`/receipts?provider=${SECOND_CLINIC}`);
+    expect(body.receipts).toHaveLength(0);
+
+    await prisma.receipt.create({
+      data: {
+        voucherId: '12',
+        beneficiaryRef: OTHER_REF,
+        providerAddress: SECOND_CLINIC,
+        serviceCode: 404,
+        amount: '20000000',
+        settledAt: new Date(Date.now() - DAY),
+      },
+    });
+    const refetched = await get(`/receipts?provider=${SECOND_CLINIC}`);
+    expect(refetched.body.receipts[0].provider).toEqual({
+      address: SECOND_CLINIC,
+      name: 'Mwanza Mission Hospital',
+      country: 'TZ',
+    });
+    // The clinic's own list must still not reveal who the care was for.
+    expect(refetched.body.receipts[0]).not.toHaveProperty('beneficiaryRef');
+  });
+
+  it('pages a cursor with the clinic named', async () => {
+    const { body: page1 } = await get(`/receipts?beneficiaryRef=${REF}&limit=1`);
+    expect(page1.receipts[0].provider.name).toBe('Ikeja General Clinic');
+    const cursor = encodeCursor(
+      new Date(page1.receipts[0].settledAt),
+      page1.receipts[0].voucherId,
+    );
+    const { body: page2 } = await get(`/receipts?beneficiaryRef=${REF}&limit=1&cursor=${cursor}`);
+    expect(page2.receipts[0].provider).toEqual({
+      address: CLINIC,
+      name: 'Ikeja General Clinic',
+      country: 'NG',
+    });
+  });
+
+  it('reports an unknown clinic instead of failing the page', async () => {
+    // A receipt whose provider row the indexer never wrote: the address came
+    // off the settlement event, the registration did not. Nothing here may
+    // invent a name for a clinic the read model has not seen.
+    await prisma.receipt.create({
+      data: {
+        voucherId: '13',
+        beneficiaryRef: REF,
+        providerAddress: UNREGISTERED_CLINIC,
+        serviceCode: 101,
+        amount: '10000000',
+        settledAt: new Date(Date.now() - DAY),
+      },
+    });
+
+    const { status, body } = await get(`/receipts?beneficiaryRef=${REF}`);
+    expect(status).toBe(200);
+    const orphan = (body.receipts as { voucherId: string }[]).find((r) => r.voucherId === '13');
+    expect(orphan).toMatchObject({
+      provider: { address: UNREGISTERED_CLINIC, name: null, country: null },
+    });
+  });
 });
 
 describe('GET /receipts/:voucherId', () => {
@@ -1017,6 +1097,31 @@ describe('GET /receipts/:voucherId', () => {
     expect(body.amountDisplay).toBe('3.0000000');
     expect(body.serviceLabel).toBe('Outpatient consult');
     expect(body).not.toHaveProperty('beneficiaryRef');
+  });
+
+  it('names the clinic on a shareable receipt', async () => {
+    const { body } = await get('/receipts/1');
+    expect(body.provider).toEqual({
+      address: CLINIC,
+      name: 'Ikeja General Clinic',
+      country: 'NG',
+    });
+    expect(body.providerAddress).toBe(CLINIC);
+  });
+
+  it('names an unknown clinic as unknown', async () => {
+    await prisma.receipt.create({
+      data: {
+        voucherId: '14',
+        beneficiaryRef: REF,
+        providerAddress: UNREGISTERED_CLINIC,
+        serviceCode: 101,
+        amount: '10000000',
+        settledAt: new Date(Date.now() - DAY),
+      },
+    });
+    const { body } = await get('/receipts/14');
+    expect(body.provider).toEqual({ address: UNREGISTERED_CLINIC, name: null, country: null });
   });
 
   it('404s for an unknown voucher', async () => {

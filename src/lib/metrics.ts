@@ -60,3 +60,17 @@ export const httpDuration = new Histogram({
   buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
   registers: [registry],
 });
+
+/**
+ * Open `GET /stream` connections in this process.
+ *
+ * A stream is held open rather than served and returned, so it costs a socket
+ * for as long as the client is watching. This is the series that shows the
+ * instance approaching `SSE_MAX_CONNECTIONS`, at which point new viewers get
+ * a 503 instead of a queue.
+ */
+export const streamConnections = new Gauge({
+  name: 'stream_connections',
+  help: 'Server-sent event streams currently open in this process',
+  registers: [registry],
+});

@@ -97,7 +97,7 @@ Errors all use one envelope, whatever layer rejected the request:
 example the Zod issues for a bad query). Error codes: `invalid_query`,
 `filter_required`, `invalid_code`, `provider_not_found`, `service_not_found`,
 `voucher_not_found`, `receipt_not_found`, `route_not_found`, `rate_limited`,
-`bad_request`, `internal_error`. A 5xx is always `internal_error`; the cause
+`stream_full`, `bad_request`, `internal_error`. A 5xx is always `internal_error`; the cause
 stays in the log, never in the response.
 
 | Endpoint | Purpose |
@@ -120,6 +120,7 @@ stays in the log, never in the response.
 | `GET /receipts?beneficiaryRef=` / `?provider=` | A patient's settled care history, or a clinic's receipts |
 | `GET /receipts/:voucherId` | One receipt, for a shareable receipt page |
 | `GET /governance` | Current and pending admin per contract, plus the handover history |
+| `GET /stream` | Live voucher state transitions as the indexer commits them (server-sent events) |
 
 `GET /vouchers` **requires at least one filter**. An unfiltered dump of every voucher is not a useful endpoint and invites scraping. It accepts `sort=createdAt|expiresAt|amount` and `order=asc|desc` (defaults: `createdAt`, `desc`). Amounts are compared with `BigInt`, so `amount` sorting is numeric rather than lexicographic.
 
@@ -130,6 +131,35 @@ fit in memory however many vouchers match. It deliberately has **no beneficiary
 reference column**.
 
 `/receipts` requires an exact `beneficiaryRef`. Because that value is an HMAC under a key held by the patient, the endpoint cannot be walked to enumerate people.
+
+Every receipt — the patient view, the clinic view and `GET /receipts/:voucherId`
+— carries the clinic that issued it in a `provider` object (`address`, `name`,
+`country`), the same shape `GET /vouchers` uses, so a receipt page no longer has
+to resolve the address separately. A receipt whose clinic is not in the registry
+reports `name: null` and `country: null` instead of being dropped from its own
+history: the settled care still happened. Clinic names and countries are public
+on-chain registry data; no receipt response gains a beneficiary reference.
+
+`GET /stream?voucher=<id>` or `GET /stream?provider=<address>` holds the
+connection open and forwards each voucher transition as the indexer commits it:
+one `data:` frame per event, containing `type`, `voucherId`,
+`providerAddress`, `status`, `ledger`, `txHash` and `at`. Exactly one filter is
+required — an unfiltered feed of care-state transitions would be a way to watch
+a clinic's patient volume in real time — and a frame never carries a beneficiary
+reference, only what the JSON routes already expose for the same transition.
+Nothing is read from the database to serve the stream, so it cannot become a
+second way to walk the read model: it only reports what just happened.
+
+Operationally: a frame is written only after the transaction that produced it
+commits, so the stream cannot announce a state the API cannot yet serve; a
+client that cannot drain what it is given is disconnected rather than allowed to
+pin a write buffer in this process; idle streams emit a `: heartbeat` comment
+every `SSE_HEARTBEAT_MS`; and one instance holds at most
+`SSE_MAX_CONNECTIONS` streams, answering `503 stream_full` past that. Shutting
+the server down ends the open streams instead of waiting on them. Because the
+indexer and the streams have to share a process, the feed is live in combined
+mode; in a split deployment an API-only process has nothing to subscribe to and
+its streams only beat (see "Running the indexer and the API separately").
 
 ### Response behaviour
 
@@ -155,6 +185,7 @@ server-side, so any instance can validate a tag produced by another.
 curl "http://localhost:8080/v1/providers?status=Active" | jq
 curl "http://localhost:8080/v1/vouchers?provider=GDOOCNK2...ZKBK" | jq
 curl -o vouchers.csv "http://localhost:8080/v1/vouchers.csv?funder=GDUPJTF3...G45"
+curl -N "http://localhost:8080/v1/stream?voucher=420001"
 ```
 
 ```json
@@ -218,12 +249,25 @@ this table and the schema drift apart.
 | `INDEXER_POLL_MS` | No | `5000` | `5000` | Milliseconds between indexer polls once caught up |
 | `INDEXER_BACKOFF_MAX_MS` | No | `60000` | `60000` | Ceiling for the backoff applied after RPC failures |
 | `SHUTDOWN_TIMEOUT_MS` | No | `15000` | `15000` | How long SIGTERM/SIGINT waits for the indexer cycle in flight before the process hard-exits |
+| `SSE_HEARTBEAT_MS` | No | `15000` | `15000` | Idle interval between `: heartbeat` comments on `GET /stream` |
+| `SSE_MAX_CONNECTIONS` | No | `64` | `64` | Concurrent `GET /stream` connections one process will hold; past that the route answers `503 stream_full` |
 
 Set `INDEXER_START_LEDGER` to the deployment ledger. Leaving it at `0` starts at the current tip and silently skips all prior history. Soroban RPC also only retains a rolling window of ledgers (about 7 days on testnet) — an indexer that falls further behind than the window cannot catch up, and `/ready` will say so rather than pretend otherwise.
 
 `READY_MAX_LAG_LEDGERS` (default `120`, about ten minutes at five seconds a ledger) is where `/ready` flips from 200 to 503. A free-tier demo can tolerate a much larger window than production, so tune it per deployment. `GET /ready` echoes it as `checks.maxLagLedgers`.
 
 `SOROBAN_RPC_URLS` is the failover list. Set it to two endpoints and an outage at the first one costs a few failed reads rather than an indexing stall; with one endpoint (or only `SOROBAN_RPC_URL` set) the behaviour is exactly as before. `GET /version` reports every configured endpoint and `GET /ready` reports the active one, both with any credentials redacted.
+
+`SSE_HEARTBEAT_MS` and `SSE_MAX_CONNECTIONS` bound the live stream. The
+heartbeat is what keeps an idle stream from being cut off by a proxy between the
+client and the instance, so lower it only if the proxy timeout is lower;
+15 seconds is comfortably inside the ~60 seconds Render and most CDNs allow.
+The connection cap is a memory guard, not a security control: each open stream
+is a socket and a subscription held for as long as the client keeps it, so
+`SSE_MAX_CONNECTIONS` is how many the process will hold before answering
+`503 stream_full`. A client that hits the cap retries — which is why
+`GET /stream` is best-effort by design and the JSON routes stay the source of
+truth. A free-tier instance with a handful of dashboards does not need many.
 
 ## Running the indexer and the API separately
 
@@ -282,7 +326,7 @@ A new, empty database needs nothing special.
 
 ## Operations
 
-- **Metrics**: `GET /metrics` is Prometheus text (not rate limited). Alert on `indexer_lag_ledgers` and `indexer_seconds_since_success`; both are set by the process running the indexer.
+- **Metrics**: `GET /metrics` is Prometheus text (not rate limited). Alert on `indexer_lag_ledgers` and `indexer_seconds_since_success`; both are set by the process running the indexer. `stream_connections` is the number of `GET /stream` clients this process is holding, so `rate-limited`-looking `503 stream_full` responses can be seen before they happen; it only moves in the process that serves the streams (combined mode, or the API in a split deployment).
 - **Failed events**: an event the indexer cannot project is stored in the `FailedEvent` table and `/ready` reports degraded until it is cleared. After fixing the cause, run `npm run indexer:retry-failed`; it exits non-zero while any event still fails.
 - **Reconciliation**: the read model is a cache of the chain, so run `npm run indexer:reconcile` on a schedule. It reads `get_voucher` for every non-terminal voucher (plus a rolling sample of settled ones, `--sample`, default 25) and records each disagreement in `ReconcileMismatch`. `/ready` reports `checks.reconcileMismatches` and `checks.reconcile: "drift"`, but stays 200: unlike a failed event, drift says nothing about whether this instance can serve traffic. `--fix` rewrites the differing rows from chain state, which is the only safe direction. The command exits non-zero while any mismatch is open.
 - **Faucet usage**: with `FAUCET_CONTRACT_ID` set, `dripped` events are indexed into `FaucetDrip` and `/stats` reports `faucetDrips` (total) and `faucetWallets` (distinct wallets) — the closest thing to a count of people who tried the demo.

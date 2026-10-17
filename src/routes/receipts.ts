@@ -6,6 +6,7 @@ import { fromBaseUnits } from '../lib/amounts.js';
 import { isValidRef } from '../lib/beneficiary.js';
 import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
 import { ApiError } from '../lib/errors.js';
+import { providerSummaries, type ProviderSummary } from '../lib/providers.js';
 import { serviceKey, serviceLabels } from '../lib/services.js';
 
 const listQuery = z
@@ -57,16 +58,30 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
         beneficiaryRef: string;
       },
       labels: Map<string, string>,
-    ) => ({
-      voucherId: r.voucherId,
-      providerAddress: r.providerAddress,
-      serviceCode: r.serviceCode,
-      serviceLabel: labels.get(serviceKey(r.providerAddress, r.serviceCode)) ?? null,
-      amount: r.amount,
-      amountDisplay: fromBaseUnits(r.amount),
-      settledAt: r.settledAt,
-      ...(isProviderView ? {} : { beneficiaryRef: r.beneficiaryRef }),
-    });
+      clinics: Map<string, ProviderSummary>,
+    ) => {
+      // The chain only records an address. The clinic row is what turns it
+      // into the name a patient recognises, resolved for the whole page in
+      // one query by `providerSummaries` rather than row by row. A clinic the
+      // indexer never saw registered keeps its address and reports the name
+      // and country as unknown rather than guessed.
+      const clinic = clinics.get(r.providerAddress);
+      return {
+        voucherId: r.voucherId,
+        providerAddress: r.providerAddress,
+        provider: {
+          address: r.providerAddress,
+          name: clinic?.name ?? null,
+          country: clinic?.country ?? null,
+        },
+        serviceCode: r.serviceCode,
+        serviceLabel: labels.get(serviceKey(r.providerAddress, r.serviceCode)) ?? null,
+        amount: r.amount,
+        amountDisplay: fromBaseUnits(r.amount),
+        settledAt: r.settledAt,
+        ...(isProviderView ? {} : { beneficiaryRef: r.beneficiaryRef }),
+      };
+    };
 
     if (cursor) {
       const decoded = decodeCursor(cursor);
@@ -88,10 +103,13 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       });
       const hasNext = rows.length > limit;
       const page = hasNext ? rows.slice(0, limit) : rows;
-      const labels = await serviceLabels(page);
+      const [labels, clinics] = await Promise.all([
+        serviceLabels(page),
+        providerSummaries(page),
+      ]);
       const last = page[page.length - 1];
       const nextCursor = hasNext && last ? encodeCursor(last.settledAt, last.voucherId) : null;
-      return { limit, nextCursor, receipts: page.map((r) => formatReceipt(r, labels)) };
+      return { limit, nextCursor, receipts: page.map((r) => formatReceipt(r, labels, clinics)) };
     }
 
     const [rows, total, spend] = await Promise.all([
@@ -110,7 +128,10 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
 
     const hasNext = rows.length > limit;
     const page = hasNext ? rows.slice(0, limit) : rows;
-    const labels = await serviceLabels(page);
+    const [labels, clinics] = await Promise.all([
+      serviceLabels(page),
+      providerSummaries(page),
+    ]);
     const last = page[page.length - 1];
     const nextCursor = hasNext && last ? encodeCursor(last.settledAt, last.voucherId) : undefined;
     const totalSpend = spend
@@ -124,7 +145,7 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       nextCursor,
       totalSpend,
       totalSpendDisplay: fromBaseUnits(totalSpend),
-      receipts: page.map((r) => formatReceipt(r, labels)),
+      receipts: page.map((r) => formatReceipt(r, labels, clinics)),
     };
   });
 
@@ -146,10 +167,21 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
     });
     if (!receipt) throw new ApiError(404, 'receipt_not_found', 'Receipt not found');
 
-    const labels = await serviceLabels([receipt]);
+    const [labels, clinics] = await Promise.all([
+      serviceLabels([receipt]),
+      providerSummaries([receipt]),
+    ]);
+    // The clinic behind the address, so a shareable receipt page can show
+    // where it was issued. `GET /vouchers/:id` already returns this shape.
+    const clinic = clinics.get(receipt.providerAddress);
     return {
       voucherId: receipt.voucherId,
       providerAddress: receipt.providerAddress,
+      provider: {
+        address: receipt.providerAddress,
+        name: clinic?.name ?? null,
+        country: clinic?.country ?? null,
+      },
       serviceCode: receipt.serviceCode,
       serviceLabel: labels.get(serviceKey(receipt.providerAddress, receipt.serviceCode)) ?? null,
       amount: receipt.amount,

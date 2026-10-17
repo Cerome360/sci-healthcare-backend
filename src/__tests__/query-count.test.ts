@@ -9,7 +9,12 @@ import type { FastifyInstance } from 'fastify';
  * - `/providers`: uses `include: { services }` (single JOIN query)
  * - `/vouchers`: uses `include: { provider }` + `serviceLabels()` helper that batches
  *   service lookups into ONE `findMany({ where: { id: { in: ids } } })`
- * - `/receipts`: same pattern as vouchers with `serviceLabels()` batching
+ * - `/receipts`: same pattern as vouchers with `serviceLabels()` batching, plus
+ *   `providerSummaries()` (#51), which batches the clinic name and country for
+ *   the whole page into ONE `findMany({ where: { address: { in: addresses } } })`
+ *   instead of a lookup per row. `Receipt` has no Prisma relation to `Provider`,
+ *   so it cannot use `include` the way `Voucher` does; the batch is what keeps
+ *   it to one query either way.
  * - `/services`: uses `groupBy` aggregation, no per-row lookups
  *
  * No route issues N+1 queries. This file serves as documentation of that finding
@@ -55,9 +60,10 @@ describe('list routes use batched queries (#79)', () => {
     expect(Array.isArray(body.vouchers)).toBe(true);
   });
 
-  it('/receipts also uses serviceLabels() batching', async () => {
-    // Same pattern as vouchers - receipts list calls serviceLabels(page)
-    // which batches all service lookups into one query.
+  it('/receipts also uses serviceLabels() and providerSummaries() batching', async () => {
+    // Same pattern as vouchers - the receipts list calls serviceLabels(page)
+    // and providerSummaries(page), each batching its lookups into one query
+    // for the whole page instead of one per row.
     const res = await app.inject({
       method: 'GET',
       url: '/receipts?beneficiaryRef=' + 'a'.repeat(64),

@@ -55,6 +55,22 @@ const schema = z.object({
    * deploy forever.
    */
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
+
+  /**
+   * Idle interval between heartbeat frames on `GET /stream`. A comment line
+   * every so often is what stops a proxy or mobile carrier from closing a
+   * connection that is alive but quiet, and it is how the server notices a
+   * client that has vanished. The floor keeps a misconfigured value from
+   * turning every open stream into a self-inflicted flood.
+   */
+  SSE_HEARTBEAT_MS: z.coerce.number().int().min(250).default(15_000),
+  /**
+   * Concurrent `GET /stream` connections this instance will hold. Each one is
+   * a socket that is never released, so the cap is what keeps a page that
+   * reconnects on every focus from using up the instance; past it the route
+   * answers 503 and the client retries later.
+   */
+  SSE_MAX_CONNECTIONS: z.coerce.number().int().positive().default(64),
 });
 
 /**

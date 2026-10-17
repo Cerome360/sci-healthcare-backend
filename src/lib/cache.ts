@@ -53,13 +53,17 @@ const CACHEABLE_ROUTES = new Set([
  *
  * `/health` and `/ready` are probed by load balancers and monitoring, which
  * have to see the current state; an intermediary replaying a cached "ok"
- * would keep a broken instance in rotation.
+ * would keep a broken instance in rotation. `/stream` is listed too: the 200
+ * response hijacks the socket and never reaches this hook, but its rejections
+ * (a bad filter, an instance at its connection cap) are ordinary JSON errors
+ * that must not be reused by a cache either.
  */
 const NO_STORE_ROUTES = new Set([
   '/health',
   '/ready',
   '/metrics',
   '/openapi.json',
+  '/stream',
   '/docs',
   '/docs/',
   '/docs/json',
