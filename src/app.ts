@@ -15,8 +15,17 @@ import {
 } from 'fastify-type-provider-zod';
 
 import { env } from './env.js';
+import {
+  CACHE_CONTROL,
+  cacheEtag,
+  cachePolicy,
+  lastIndexedLedger,
+  matchesEtag,
+  NO_STORE,
+} from './lib/cache.js';
 import { errorEnvelope } from './lib/errors.js';
 import { httpDuration, httpRequests, registry } from './lib/metrics.js';
+import { APP_VERSION } from './lib/version.js';
 import { governanceRoutes } from './routes/governance.js';
 import { healthRoutes } from './routes/health.js';
 import { providerRoutes } from './routes/providers.js';
@@ -80,7 +89,9 @@ export async function buildApp(
           'base units (stroops). A 7-decimal Stellar asset like USDC uses 10^7 ' +
           'base units per whole token, so "30000000" = 3.0000000 USDC. Amounts ' +
           'are strings, not numbers, because they can exceed Number.MAX_SAFE_INTEGER.',
-        version: '0.3.0',
+        // Same source as GET /version, so the spec cannot drift from the
+        // package the way a literal did.
+        version: APP_VERSION,
       },
     },
     transform: jsonSchemaTransform,
@@ -101,9 +112,47 @@ export async function buildApp(
 
   // Every response, including errors and 404s, carries the id that appears
   // in the matching log line, plus the configured Stellar network name.
+  //
+  // The same hook adds HTTP caching for the read routes. It lives here, in
+  // one place, so routes stay unchanged and cannot forget it. The validator
+  // is the indexer cursor plus the request URL: the data cannot have changed
+  // without a new ledger, and a different filter is a different resource.
   app.addHook('onSend', async (req, reply, payload) => {
     reply.header('x-request-id', req.id);
     reply.header('x-stellar-network', env.STELLAR_NETWORK);
+
+    const policy = cachePolicy(req.routeOptions.url);
+    if (policy === NO_STORE) {
+      reply.header('cache-control', NO_STORE);
+      return payload;
+    }
+    if (policy === null) return payload;
+
+    // Errors (a missing voucher, a rate-limited client, a database failure)
+    // must not be reused: the next request may well succeed.
+    if (reply.statusCode !== 200) {
+      reply.header('cache-control', NO_STORE);
+      return payload;
+    }
+
+    reply.header('cache-control', CACHE_CONTROL);
+    const lastLedger = await lastIndexedLedger();
+    // The read model could not be inspected, so there is no honest validator
+    // to offer; serve the response uncacheable rather than lie about it.
+    if (lastLedger === null) {
+      reply.header('cache-control', NO_STORE);
+      return payload;
+    }
+
+    const etag = cacheEtag(lastLedger, req.url);
+    reply.header('etag', etag);
+
+    if (matchesEtag(req.headers['if-none-match'], etag)) {
+      // Returning null drops the body; Fastify handles 304 framing.
+      reply.code(304);
+      return null;
+    }
+
     return payload;
   });
 

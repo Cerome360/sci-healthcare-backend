@@ -67,6 +67,8 @@ The cursor is guarded by a lease (stored on `IndexerState`). However many indexe
 
 When the RPC fails, the indexer backs off exponentially (with jitter, up to `INDEXER_BACKOFF_MAX_MS`) instead of retrying every poll interval, and reports the failure once per streak rather than once per attempt — retrying at full speed adds load exactly where it hurts and buries every other log line. Configure more than one endpoint in `SOROBAN_RPC_URLS` and repeated failures move reads to the next one; the active endpoint is logged on each switch and reported as `checks.rpcUrl` on `/ready`.
 
+On `SIGTERM` (every Render deploy) or `SIGINT`, the indexer stops scheduling new cycles, waits for the cycle in flight to commit its transaction and save the cursor (bounded by `SHUTDOWN_TIMEOUT_MS`), then releases the lease so the replacement instance can take over immediately. The process then closes the HTTP server and the database connection, with a hard exit as a backstop. If the cycle overruns the timeout the lease is deliberately left to expire rather than freed, so a peer cannot race a cycle that may still be committing.
+
 ## API
 
 Every route is served under the canonical `/v1` prefix. The unversioned paths
@@ -97,6 +99,7 @@ stays in the log, never in the response.
 | --- | --- |
 | `GET /health` | Liveness |
 | `GET /ready` | Readiness; 503 once the indexer trails by more than `READY_MAX_LAG_LEDGERS` |
+| `GET /version` | Build version and commit, network, RPC endpoints, contract ids, indexer start ledger and process start time |
 | `GET /stats` | Protocol counters for the dashboard |
 | `GET /providers` | Verified clinics, filterable by `status`, `country`, `q` (case-insensitive name search) |
 | `GET /providers/:address` | One clinic and its service catalogue |
@@ -131,6 +134,15 @@ are exempt so a struggling service can always be probed. JSON above 1 KB is
 gzip-compressed when the client accepts it, and every response carries the
 standard `@fastify/helmet` security headers (no CSP — this API serves JSON, not
 HTML).
+
+List and detail routes are cacheable for a short window. They send
+`Cache-Control: public, max-age=5, stale-while-revalidate=30` and a weak `ETag`
+derived from the indexer's last ledger and the exact request URL, so a reload
+with a matching `If-None-Match` gets `304 Not Modified` without the API touching
+the read model. A newly indexed ledger changes every tag, and a different filter
+is a different tag. `/health`, `/ready`, `/metrics` and `/openapi.json` are
+`Cache-Control: no-store`, as is every error response. Nothing is cached
+server-side, so any instance can validate a tag produced by another.
 
 ### Example
 
@@ -193,6 +205,7 @@ npm run dev
 | `INDEXER_START_LEDGER` | Ledger to index from; `0` means start at the tip | `4465529` |
 | `INDEXER_POLL_MS` | Poll interval | `5000` |
 | `INDEXER_BACKOFF_MAX_MS` | Ceiling for the backoff applied after RPC failures | `60000` |
+| `SHUTDOWN_TIMEOUT_MS` | How long SIGTERM/SIGINT waits for the indexer cycle in flight before the process hard-exits | `15000` |
 
 Set `INDEXER_START_LEDGER` to the deployment ledger. Leaving it at `0` starts at the current tip and silently skips all prior history. Soroban RPC also only retains a rolling window of ledgers (about 7 days on testnet) — an indexer that falls further behind than the window cannot catch up, and `/ready` will say so rather than pretend otherwise.
 

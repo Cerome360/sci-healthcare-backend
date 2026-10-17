@@ -17,15 +17,52 @@ async function main(): Promise<void> {
   const indexer = new Indexer(app.log);
   await indexer.start();
 
+  let shuttingDown = false;
+
+  /**
+   * Stops the process in a defined order: new indexer cycles stop, the cycle
+   * already in flight commits and saves its cursor (bounded by
+   * `SHUTDOWN_TIMEOUT_MS`), then the HTTP server drains and the database
+   * connection closes.
+   *
+   * The hard timer is the backstop for the whole sequence, a few seconds past
+   * the indexer's own bound: a wedged socket or a stuck close must not leave
+   * a deploy waiting on a process Render is about to SIGKILL anyway. Exiting
+   * non-zero makes the unclean shutdown visible in the platform logs.
+   */
   const shutdown = async (signal: string): Promise<void> => {
-    app.log.info({ signal }, 'shutting down');
-    await indexer.stop();
-    await app.close();
-    await disconnect();
-    process.exit(0);
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    app.log.info(
+      { signal, timeoutMs: env.SHUTDOWN_TIMEOUT_MS },
+      'shutting down: finishing the current indexer cycle, then closing the server',
+    );
+
+    const hardExit = setTimeout(() => {
+      app.log.error(
+        { signal, timeoutMs: env.SHUTDOWN_TIMEOUT_MS + 5_000 },
+        'shutdown did not complete in time; exiting forcefully',
+      );
+      process.exit(1);
+    }, env.SHUTDOWN_TIMEOUT_MS + 5_000);
+    hardExit.unref();
+
+    try {
+      await indexer.stop();
+      await app.close();
+      await disconnect();
+      clearTimeout(hardExit);
+      app.log.info({ signal }, 'shutdown complete');
+      process.exit(0);
+    } catch (err) {
+      app.log.error({ err, signal }, 'shutdown failed; exiting');
+      process.exit(1);
+    }
   };
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
-  process.on('SIGINT', () => void shutdown('SIGINT'));
+
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  process.once('SIGINT', () => void shutdown('SIGINT'));
 
   await app.listen({ port: env.PORT, host: env.HOST });
   app.log.info(

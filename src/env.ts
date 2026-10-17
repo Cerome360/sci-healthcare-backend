@@ -41,6 +41,13 @@ const schema = z.object({
   INDEXER_POLL_MS: z.coerce.number().int().positive().default(5000),
   /** Ceiling for the indexer's exponential backoff after RPC failures. */
   INDEXER_BACKOFF_MAX_MS: z.coerce.number().int().positive().default(60_000),
+  /**
+   * How long shutdown waits for the indexer cycle in flight before giving
+   * up. Render sends SIGTERM on every deploy, so the process must finish the
+   * transaction and save the cursor, but a wedged cycle must not hang the
+   * deploy forever.
+   */
+  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
 });
 
 /**

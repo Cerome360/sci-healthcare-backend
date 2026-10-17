@@ -2,28 +2,46 @@ import type { FastifyInstance } from 'fastify';
 
 import { prisma } from '../db.js';
 import { env } from '../env.js';
+import { APP_VERSION, deployedCommit, STARTED_AT } from '../lib/version.js';
 import { server } from '../stellar/client.js';
 
 export async function healthRoutes(app: FastifyInstance): Promise<void> {
+  // The app-level onSend hook sends `Cache-Control: no-store` on this and
+  // /ready; both are probed continuously and must reflect the current state.
   app.get('/health', {
     schema: { tags: ['health'], summary: 'Liveness check' },
   }, async () => ({ status: 'ok' }));
 
   /**
-   * Version and network metadata.
+   * Version and deployment metadata.
    *
-   * Returns the configured network name, RPC URL (redacted), and contract ids
-   * so operators can verify which chain this instance is serving.
+   * The first question in an incident is which build is running and which
+   * chain and contracts it indexes. This answers it without shell access:
+   * the package version, the deployed commit when the platform exposes one,
+   * the network, the RPC endpoints in use, the contract ids, the ledger the
+   * indexer was configured to start from, and when this process started.
+   *
+   * Response fields are deliberately allow-listed. Nothing from the
+   * environment is spread wholesale, so a new secret variable cannot leak
+   * here by accident; `DATABASE_URL` and any credential in an RPC URL are
+   * never included.
    */
   app.get('/version', {
     schema: {
       tags: ['health'],
-      summary: 'Version and network info',
-      description: 'Reports the configured Stellar network, RPC endpoint, and contract ids.',
+      summary: 'Version and deployment info',
+      description:
+        'Reports the build version and commit, the configured Stellar network, ' +
+        'the RPC endpoints in use (redacted), the indexed contract ids, the ' +
+        'configured indexer start ledger, and when this process started.',
     },
   }, async () => {
     return {
-      version: '0.3.0',
+      // Read from package.json at startup, so it always matches the code.
+      version: APP_VERSION,
+      // RENDER_GIT_COMMIT on Render, GIT_COMMIT elsewhere; null when neither
+      // is set rather than a fabricated value.
+      commit: deployedCommit(),
       network: env.STELLAR_NETWORK,
       // The endpoint currently in use, which failover may have moved.
       rpcUrl: server.activeUrl,
@@ -35,6 +53,13 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
         usdc: env.USDC_CONTRACT_ID ?? null,
         faucet: env.FAUCET_CONTRACT_ID ?? null,
       },
+      // The configured first ledger for this deployment. 0 means "the tip
+      // when the indexer first ran", which is why the cursor itself stays
+      // on /ready as checks.indexedLedger.
+      indexerStartLedger: env.INDEXER_START_LEDGER,
+      // Process start, not the build time: with several replicas this tells
+      // an operator which one they are looking at and how long it has run.
+      startedAt: STARTED_AT,
     };
   });
 

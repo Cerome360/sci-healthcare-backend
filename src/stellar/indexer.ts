@@ -98,15 +98,59 @@ export function nextDelay(
   return Math.min(maxMs, Math.round(delay * (1 + random() * BACKOFF_JITTER)));
 }
 
+/**
+ * How long `stop()` waits for the cycle already in flight.
+ *
+ * A cycle is a single transaction committed together with the cursor, so
+ * the right move on SIGTERM is to let it finish rather than roll it back.
+ * It is still bounded: a wedged RPC call or a locked database must not hold
+ * a deploy open indefinitely.
+ */
+class CycleTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`indexer cycle did not finish within ${timeoutMs}ms`);
+    this.name = 'CycleTimeoutError';
+  }
+}
+
+function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new CycleTimeoutError(ms)), ms);
+    // Do not keep the event loop alive for a timer nobody is waiting on once
+    // the cycle settles.
+    timer.unref();
+    promise.then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  });
+}
+
 export type IndexerOptions = {
   /** Overridable for tests; defaults to a lease over this database. */
   lease?: IndexerLease;
+  /**
+   * How long `stop()` waits for an in-flight cycle. Defaults to
+   * `SHUTDOWN_TIMEOUT_MS`; tests set it small so they need not wait for the
+   * production bound.
+   */
+  shutdownTimeoutMs?: number;
 };
 
 export class Indexer {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private stopped = false;
+  /** The scheduled cycle currently executing, if any; awaited by stop(). */
+  private inFlight: Promise<void> | null = null;
+  /** Shared by concurrent stop() calls so shutdown runs once. */
+  private stopping: Promise<void> | null = null;
   /** Set by the last poll: true when a full page suggests a backlog. */
   private hasMore = false;
   /** True while this instance holds the single-writer lease. */
@@ -116,12 +160,14 @@ export class Indexer {
   /** Consecutive failed cycles; drives the backoff and is reset on success. */
   private failures = 0;
   private readonly lease: IndexerLease;
+  private readonly shutdownTimeoutMs: number;
 
   constructor(
     private readonly log: FastifyBaseLogger,
     opts: IndexerOptions = {},
   ) {
     this.lease = opts.lease ?? new IndexerLease();
+    this.shutdownTimeoutMs = opts.shutdownTimeoutMs ?? env.SHUTDOWN_TIMEOUT_MS;
   }
 
   async start(): Promise<void> {
@@ -144,9 +190,52 @@ export class Indexer {
     this.schedule();
   }
 
+  /**
+   * Stops scheduling new cycles and waits for the one in flight to commit.
+   *
+   * Render sends SIGTERM on every deploy. Exiting mid-cycle would roll back
+   * the transaction and replay it on the next boot; harmless because the
+   * handlers are idempotent, but finishing is faster and leaves the read
+   * model immediately current for the replacement instance. The wait is
+   * bounded by `shutdownTimeoutMs` so a wedged cycle cannot hang a deploy.
+   * Safe to call more than once.
+   */
   async stop(): Promise<void> {
+    this.stopping ??= this.shutdown();
+    return this.stopping;
+  }
+
+  private async shutdown(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+
+    if (this.inFlight) {
+      this.log.info(
+        { timeoutMs: this.shutdownTimeoutMs },
+        'waiting for the current indexer cycle to finish',
+      );
+      try {
+        await withTimeout(this.inFlight, this.shutdownTimeoutMs);
+        this.log.info('current indexer cycle finished; shutting down');
+      } catch (err) {
+        if (err instanceof CycleTimeoutError) {
+          // Deliberately leave the lease alone. The abandoned cycle may still
+          // commit, and letting a peer take the cursor while it does is the
+          // one race the lease exists to prevent. It expires on its own.
+          this.log.error(
+            { timeoutMs: this.shutdownTimeoutMs },
+            'current indexer cycle did not finish before shutdown; leaving the lease to expire',
+          );
+          return;
+        }
+        // The cycle itself failed; the lease can still be handed back.
+        this.log.warn({ err }, 'current indexer cycle failed while shutting down');
+      }
+    }
+
     if (this.holdsLease) {
       this.holdsLease = false;
       await this.lease.release();
@@ -154,11 +243,24 @@ export class Indexer {
   }
 
   /**
+   * Starts one scheduled cycle and remembers it so `stop()` can wait for it.
+   * The cycle body handles its own errors, so this promise never rejects.
+   */
+  private cycle(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    const work = this.runCycle();
+    this.inFlight = work;
+    return work.finally(() => {
+      if (this.inFlight === work) this.inFlight = null;
+    });
+  }
+
+  /**
    * Runs one scheduled cycle: renew or take the lease, then poll. A standby
    * instance does not touch the cursor; it just retries until the lease is
    * free or expired.
    */
-  private async cycle(): Promise<void> {
+  private async runCycle(): Promise<void> {
     if (this.stopped) return;
     try {
       if (this.holdsLease && !(await this.lease.refresh())) {
@@ -215,6 +317,7 @@ export class Indexer {
         ? nextDelay(this.failures)
         : nextPollDelay(this.hasMore && this.holdsLease, env.INDEXER_POLL_MS);
     this.timer = setTimeout(() => {
+      this.timer = null;
       void this.cycle();
     }, delay);
   }

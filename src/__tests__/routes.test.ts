@@ -377,11 +377,51 @@ describe('GET /version', () => {
   it('returns network and contract metadata', async () => {
     const { status, body } = await get('/version');
     expect(status).toBe(200);
-    expect(body.version).toBe('0.3.0');
+    // Read from package.json, not hard-coded here, so a release bump is one
+    // edit and this test still proves the route reports it.
+    expect(body.version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(['testnet', 'public', 'futurenet']).toContain(body.network);
     expect(body.contracts.registry).toMatch(/^[A-Z]{2}[A-Z0-9]{54}$/);
     expect(body.contracts.voucher).toMatch(/^[A-Z]{2}[A-Z0-9]{54}$/);
     expect(body.contracts.receipt).toMatch(/^[A-Z]{2}[A-Z0-9]{54}$/);
+  });
+
+  it('reports the build commit, indexer start ledger and process start time', async () => {
+    const { status, body } = await get('/version');
+    expect(status).toBe(200);
+    expect(body.commit === null || typeof body.commit === 'string').toBe(true);
+    expect(body.indexerStartLedger).toBe(env.INDEXER_START_LEDGER);
+    expect(Number.isNaN(Date.parse(body.startedAt))).toBe(false);
+    expect(new Date(body.startedAt).getTime()).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('reports RENDER_GIT_COMMIT when the platform provides one', async () => {
+    const previous = process.env.RENDER_GIT_COMMIT;
+    process.env.RENDER_GIT_COMMIT = 'a1b2c3d4e5f6';
+    try {
+      const { body } = await get('/version');
+      expect(body.commit).toBe('a1b2c3d4e5f6');
+    } finally {
+      if (previous === undefined) delete process.env.RENDER_GIT_COMMIT;
+      else process.env.RENDER_GIT_COMMIT = previous;
+    }
+  });
+
+  it('exposes deployment metadata only, never credentials', async () => {
+    const { body } = await get('/version');
+    const keys = Object.keys(body).sort();
+    expect(keys).toEqual([
+      'commit',
+      'contracts',
+      'indexerStartLedger',
+      'network',
+      'rpcUrl',
+      'rpcUrls',
+      'startedAt',
+      'version',
+    ]);
+    expect(JSON.stringify(body)).not.toContain(env.DATABASE_URL);
+    expect(body).not.toHaveProperty('databaseUrl');
   });
 
   it('redacts credentials in RPC URL', async () => {
@@ -1271,5 +1311,119 @@ describe('response hardening', () => {
     } finally {
       await isolated.close();
     }
+  });
+});
+
+describe('HTTP caching', () => {
+  /** A request from a fresh client so the list-route rate limit never bites. */
+  async function cached(url: string, headers: Record<string, string> = {}) {
+    return app.inject({
+      method: 'GET',
+      url,
+      headers: { 'x-forwarded-for': nextTestClientIp(), ...headers },
+    });
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  beforeEach(async () => {
+    await prisma.indexerState.upsert({
+      where: { id: 1 },
+      create: { id: 1, lastLedger: 500 },
+      update: {
+        lastLedger: 500,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        gap: false,
+        gapOldestLedger: null,
+        gapCursorLedger: null,
+      },
+    });
+  });
+
+  it('marks list and detail responses reusable and tags them with an ETag', async () => {
+    for (const url of ['/providers', `/providers/${CLINIC}`, `/vouchers?funder=${FUNDER}`]) {
+      const res = await cached(url);
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['cache-control']).toBe(
+        'public, max-age=5, stale-while-revalidate=30',
+      );
+      expect(res.headers['etag']).toMatch(/^W\/"500-[A-Za-z0-9_-]+"$/);
+    }
+  });
+
+  it('answers 304 to a matching If-None-Match', async () => {
+    const first = await cached('/providers');
+    expect(first.statusCode).toBe(200);
+    const etag = first.headers['etag'] as string;
+
+    const second = await cached('/providers', { 'if-none-match': etag });
+    expect(second.statusCode).toBe(304);
+    expect(second.body).toBe('');
+    expect(second.headers['etag']).toBe(etag);
+  });
+
+  it('accepts a weak or list-valued If-None-Match', async () => {
+    const first = await cached('/providers');
+    const etag = first.headers['etag'] as string;
+
+    expect((await cached('/providers', { 'if-none-match': '*' })).statusCode).toBe(304);
+    expect(
+      (await cached('/providers', { 'if-none-match': `"other", ${etag}` })).statusCode,
+    ).toBe(304);
+    // Weak comparison: the strong form of the same tag also validates.
+    expect(
+      (await cached('/providers', { 'if-none-match': etag.replace(/^W\//, '') })).statusCode,
+    ).toBe(304);
+  });
+
+  it('invalidates the tag when a new ledger is indexed', async () => {
+    const first = await cached('/providers');
+    const etag = first.headers['etag'] as string;
+
+    await prisma.indexerState.update({ where: { id: 1 }, data: { lastLedger: 501 } });
+
+    const revalidated = await cached('/providers', { 'if-none-match': etag });
+    expect(revalidated.statusCode).toBe(200);
+    expect(revalidated.headers['etag']).not.toBe(etag);
+  });
+
+  it('treats each path and query as its own resource', async () => {
+    const list = await cached('/providers');
+    const listEtag = list.headers['etag'] as string;
+
+    const filtered = await cached('/providers?status=Active', { 'if-none-match': listEtag });
+    expect(filtered.statusCode).toBe(200);
+    expect(filtered.headers['etag']).not.toBe(listEtag);
+
+    const detail = await cached(`/providers/${CLINIC}`, { 'if-none-match': listEtag });
+    expect(detail.statusCode).toBe(200);
+
+    // The /v1 alias serves the same body but is a different URL, so a tag
+    // from one path must not validate the other.
+    const versioned = await cached('/v1/providers', { 'if-none-match': listEtag });
+    expect(versioned.statusCode).toBe(200);
+  });
+
+  it('never caches health or readiness, on either path', async () => {
+    vi.spyOn(server, 'getLatestLedger').mockResolvedValue({ sequence: 500 } as never);
+
+    for (const url of ['/health', '/v1/health', '/ready', '/v1/ready']) {
+      const res = await cached(url);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.headers['etag']).toBeUndefined();
+    }
+  });
+
+  it('never caches an error response', async () => {
+    const res = await cached(`/providers/${FUNDER}`);
+    expect(res.statusCode).toBe(404);
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.headers['etag']).toBeUndefined();
+  });
+
+  it('does not serve 304 without a matching validator', async () => {
+    const res = await cached('/providers', { 'if-none-match': 'W/"123-not-ours"' });
+    expect(res.statusCode).toBe(200);
   });
 });

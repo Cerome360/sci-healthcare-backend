@@ -75,7 +75,11 @@ CI still enforces the same rules.
 - **i128 amounts are strings, never numbers.** `Number` silently loses precision
   above 2^53. Use `BigInt` for arithmetic and store decimal strings.
 - **Event handlers must be idempotent.** The indexer replays on crash, so use
-  upserts keyed by on-chain id.
+  upserts keyed by on-chain id, never an append or an increment. A crash
+  between the writes and the cursor commit replays the whole page, so a
+  handler that is not idempotent silently doubles data. `src/__tests__/idempotency.test.ts`
+  replays a full lifecycle and compares every table; a new handler that
+  breaks replay fails there.
 
 ## Decoding events
 

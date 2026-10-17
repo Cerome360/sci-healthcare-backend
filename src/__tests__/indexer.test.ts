@@ -376,3 +376,89 @@ describe('faucet drips', () => {
     await prisma.failedEvent.deleteMany({ where: { id: 'dripped-104' } });
   });
 });
+
+describe('graceful shutdown', () => {
+  /** A cycle that blocks in collectEvents until the test releases it. */
+  function blockPoll(): { finish: () => void } {
+    let finish!: () => void;
+    vi.mocked(collectEvents).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve({ events: [], throughLedger: 150, hasMore: false } as never);
+        }) as never,
+    );
+    return { finish: () => finish() };
+  }
+
+  it('waits for the cycle in flight before releasing the lease', async () => {
+    const poll = blockPoll();
+    const log = fakeLog();
+    const indexer = new Indexer(log, { shutdownTimeoutMs: 5_000 });
+
+    await indexer.start();
+    const cycle = indexer['cycle']();
+    await vi.waitFor(() => expect(collectEvents).toHaveBeenCalled());
+
+    let stopped = false;
+    const stopping = indexer.stop().then(() => {
+      stopped = true;
+    });
+
+    // The cycle is still writing; stop() must not resolve yet.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(stopped).toBe(false);
+    expect(log.info).toHaveBeenCalledWith(
+      { timeoutMs: 5_000 },
+      'waiting for the current indexer cycle to finish',
+    );
+
+    poll.finish();
+    await cycle;
+    await stopping;
+
+    expect(stopped).toBe(true);
+    expect(log.info).toHaveBeenCalledWith('current indexer cycle finished; shutting down');
+
+    // The cycle committed its cursor and the lease is free for the instance
+    // that replaces this one.
+    const state = await prisma.indexerState.findUniqueOrThrow({ where: { id: 1 } });
+    expect(state.lastLedger).toBe(150);
+    expect(state.leaseOwner).toBeNull();
+    expect(state.leaseExpiresAt).toBeNull();
+  });
+
+  it('is safe to call stop() more than once', async () => {
+    const indexer = new Indexer(fakeLog(), { shutdownTimeoutMs: 5_000 });
+    await indexer.start();
+
+    await Promise.all([indexer.stop(), indexer.stop()]);
+
+    const state = await prisma.indexerState.findUniqueOrThrow({ where: { id: 1 } });
+    expect(state.leaseOwner).toBeNull();
+  });
+
+  it('gives up after the shutdown timeout instead of hanging the deploy', async () => {
+    const poll = blockPoll();
+    const log = fakeLog();
+    const indexer = new Indexer(log, { shutdownTimeoutMs: 10 });
+
+    await indexer.start();
+    const cycle = indexer['cycle']();
+    await vi.waitFor(() => expect(collectEvents).toHaveBeenCalled());
+
+    await indexer.stop();
+
+    expect(log.error).toHaveBeenCalledWith(
+      { timeoutMs: 10 },
+      expect.stringContaining('leaving the lease to expire'),
+    );
+
+    // The lease stays held on purpose: the abandoned cycle may still commit,
+    // and a peer taking the cursor meanwhile is the race the lease prevents.
+    const state = await prisma.indexerState.findUniqueOrThrow({ where: { id: 1 } });
+    expect(state.leaseOwner).not.toBeNull();
+
+    poll.finish();
+    await cycle;
+  });
+});

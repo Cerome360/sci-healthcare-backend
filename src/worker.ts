@@ -24,10 +24,19 @@ export async function start(opts: WorkerOptions = {}): Promise<Indexer> {
   const indexer = new Indexer(log);
 
   const shutdown = async (signal: string): Promise<void> => {
-    log.info({ signal }, 'shutting down indexer');
-    await indexer.stop();
-    await disconnect();
-    process.exit(0);
+    log.info(
+      { signal, timeoutMs: env.SHUTDOWN_TIMEOUT_MS },
+      'shutting down indexer: finishing the current cycle',
+    );
+    try {
+      await indexer.stop();
+      await disconnect();
+      log.info({ signal }, 'indexer shutdown complete');
+      process.exit(0);
+    } catch (err) {
+      log.error({ err, signal }, 'indexer shutdown failed; exiting');
+      process.exit(1);
+    }
   };
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
   process.once('SIGINT', () => void shutdown('SIGINT'));
