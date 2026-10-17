@@ -24,6 +24,14 @@ npm run typecheck
 npm test
 ```
 
+### Checking the read model against the chain
+
+The database is a cache. `npm run indexer:reconcile` reads `get_voucher` for
+every non-terminal voucher and reports any row that disagrees with the
+contract; `-- --fix` rewrites those rows from chain state. Run it after
+touching a handler or the decoder — a projection bug usually shows up there
+before anyone notices it in the API.
+
 ### Optional: pre-commit lint hook
 
 Run `npm install` once and the `prepare` script installs a git pre-commit hook

@@ -41,8 +41,12 @@ services:
         value: info
       - key: STELLAR_NETWORK
         value: testnet
+      # A second endpoint keeps indexing alive through an RPC outage.
+      # Comma-separated; SOROBAN_RPC_URL alone still works.
       - key: SOROBAN_RPC_URL
         value: https://soroban-testnet.stellar.org
+      # - key: SOROBAN_RPC_URLS
+      #   value: https://soroban-testnet.stellar.org,https://backup-rpc.example
       - key: NETWORK_PASSPHRASE
         value: "Test SDF Network ; September 2015"
       - key: REGISTRY_CONTRACT_ID
@@ -53,6 +57,9 @@ services:
         value: CBCJRI2BCZBMZNX77WWDC2NGSV4ZNAN5Q23XHYNBH6UTOQMPJHZGX5C7
       - key: USDC_CONTRACT_ID
         value: CCRLJ7FEIKTR3GBT3VQQPSIJGRBO2WPNMVFKJDP6AYGJQWECOR4QVE5M
+      # Testnet demo faucet; counted in /stats when set.
+      - key: FAUCET_CONTRACT_ID
+        value: CCB25WG7DQ2CSNXPTOHZO2PDZ324FQPZLH3LSNCCLWYM3FEH52GEXC47
       # Ledger the contracts were deployed at. Leaving this at 0 would start
       # the indexer at the current tip and silently skip all prior history.
       - key: INDEXER_START_LEDGER

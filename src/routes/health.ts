@@ -25,12 +25,15 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
     return {
       version: '0.3.0',
       network: env.STELLAR_NETWORK,
-      rpcUrl: env.SOROBAN_RPC_URL.replace(/:\/\/[^/]+@/, '://***@'),
+      // The endpoint currently in use, which failover may have moved.
+      rpcUrl: server.activeUrl,
+      rpcUrls: server.allUrls,
       contracts: {
         registry: env.REGISTRY_CONTRACT_ID,
         voucher: env.VOUCHER_CONTRACT_ID,
         receipt: env.RECEIPT_CONTRACT_ID,
         usdc: env.USDC_CONTRACT_ID ?? null,
+        faucet: env.FAUCET_CONTRACT_ID ?? null,
       },
     };
   });
@@ -58,6 +61,14 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       const failedEvents = await prisma.failedEvent.count();
       checks.failedEvents = failedEvents;
       if (failedEvents > 0) healthy = false;
+
+      // Drift found by `npm run indexer:reconcile`. Reported but not fatal:
+      // unlike a failed event, which is a write the indexer knows it lost,
+      // a stale mismatch row says nothing about whether this instance can
+      // serve traffic, and 503 would pull a working API out of rotation.
+      const reconcileMismatches = await prisma.reconcileMismatch.count();
+      checks.reconcileMismatches = reconcileMismatches;
+      checks.reconcile = reconcileMismatches > 0 ? 'drift' : 'ok';
     } catch (err) {
       healthy = false;
       checks.database = `error: ${(err as Error).message}`;
@@ -70,6 +81,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       ]);
       const lag = state ? latest.sequence - state.lastLedger : null;
       checks.rpc = 'ok';
+      checks.rpcUrl = server.activeUrl;
       checks.latestLedger = latest.sequence;
       checks.indexedLedger = state?.lastLedger ?? null;
       checks.lagLedgers = lag;
@@ -96,7 +108,10 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       }
     } catch (err) {
       healthy = false;
+      // Every configured endpoint failed, not just the active one.
       checks.rpc = `error: ${(err as Error).message}`;
+      checks.rpcUrl = server.activeUrl;
+      checks.rpcUrls = server.allUrls;
     }
 
     checks.network = env.STELLAR_NETWORK;
@@ -112,16 +127,21 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
   app.get('/stats', {
     schema: { tags: ['health'], summary: 'Aggregate dashboard counters' },
   }, async () => {
-    const [providers, activeProviders, vouchers, settled, receipts] = await Promise.all([
-      prisma.provider.count(),
-      prisma.provider.count({ where: { status: 'Active' } }),
-      prisma.voucher.count(),
-      prisma.voucher.findMany({
-        where: { status: 'Settled' },
-        select: { amount: true },
-      }),
-      prisma.receipt.count(),
-    ]);
+    const [providers, activeProviders, vouchers, settled, receipts, faucetDrips, faucetWallets] =
+      await Promise.all([
+        prisma.provider.count(),
+        prisma.provider.count({ where: { status: 'Active' } }),
+        prisma.voucher.count(),
+        prisma.voucher.findMany({
+          where: { status: 'Settled' },
+          select: { amount: true },
+        }),
+        prisma.receipt.count(),
+        prisma.faucetDrip.count(),
+        // Distinct wallets, which is the figure worth reporting: one person
+        // pressing the faucet button four times is not four people.
+        prisma.faucetDrip.groupBy({ by: ['wallet'] }),
+      ]);
 
     const settledValue = settled
       .reduce((acc, v) => acc + BigInt(v.amount), 0n)
@@ -134,6 +154,10 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       settledVouchers: settled.length,
       settledValue,
       receipts,
+      // Both are 0 when no FAUCET_CONTRACT_ID is configured, because no
+      // drip event ever reaches the indexer.
+      faucetDrips,
+      faucetWallets: faucetWallets.length,
     };
   });
 }

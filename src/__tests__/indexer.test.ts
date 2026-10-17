@@ -1,11 +1,11 @@
-import { nativeToScVal, xdr } from '@stellar/stellar-sdk';
+import { Address, nativeToScVal, xdr } from '@stellar/stellar-sdk';
 import type { FastifyBaseLogger } from 'fastify';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { prisma } from '../db.js';
 import { env } from '../env.js';
 import { server } from '../stellar/client.js';
-import { Indexer } from '../stellar/indexer.js';
+import { Indexer, nextDelay } from '../stellar/indexer.js';
 import { collectEvents } from '../stellar/paging.js';
 
 vi.mock('../stellar/paging.js', () => ({
@@ -18,14 +18,19 @@ function sym(s: string): xdr.ScVal {
   return nativeToScVal(s, { type: 'symbol' });
 }
 
-function rawEvent(name: string, ledger = 101, data: Record<string, unknown> = {}) {
+function rawEvent(
+  name: string,
+  ledger = 101,
+  data: Record<string, unknown> = {},
+  topics: xdr.ScVal[] = [],
+) {
   return {
     id: `${name}-${ledger}`,
     contractId: env.REGISTRY_CONTRACT_ID,
     txHash: TX_HASH,
     ledger,
     ledgerClosedAt: '2026-10-01T00:00:00Z',
-    topic: [sym(name)],
+    topic: [sym(name), ...topics],
     value: nativeToScVal(data),
   };
 }
@@ -203,5 +208,171 @@ describe('single-writer lease', () => {
     } finally {
       await peer.stop();
     }
+  });
+});
+
+describe('backoff after RPC failures', () => {
+  const failing = (): void => {
+    vi.mocked(collectEvents).mockRejectedValue(new Error('rpc unavailable'));
+  };
+
+  it('reports one error for a failure streak, not one per attempt', async () => {
+    failing();
+    const log = fakeLog();
+    const indexer = new Indexer(log);
+
+    await indexer.tick();
+    await indexer.tick();
+    await indexer.tick();
+
+    const pollErrors = log.error.mock.calls.filter(([, msg]) => msg === 'indexer poll failed');
+    expect(pollErrors).toHaveLength(1);
+    expect(indexer.failureStreak).toBe(3);
+  });
+
+  it('backs off further with every failure, up to the cap', async () => {
+    failing();
+    const indexer = new Indexer(fakeLog());
+
+    await indexer.tick();
+    const first = nextDelay(indexer.failureStreak, 1000, 60_000, () => 0);
+    await indexer.tick();
+    const second = nextDelay(indexer.failureStreak, 1000, 60_000, () => 0);
+
+    expect(second).toBeGreaterThan(first);
+  });
+
+  it('resets the backoff after a cycle that works', async () => {
+    failing();
+    const log = fakeLog();
+    const indexer = new Indexer(log);
+
+    await indexer.tick();
+    await indexer.tick();
+    expect(indexer.failureStreak).toBe(2);
+
+    stubEvents([], 150);
+    await indexer.tick();
+
+    expect(indexer.failureStreak).toBe(0);
+    expect(log.info).toHaveBeenCalledWith({ afterFailures: 2 }, 'indexer recovered');
+  });
+
+  it('reports the next failure streak again once it has recovered', async () => {
+    failing();
+    const log = fakeLog();
+    const indexer = new Indexer(log);
+
+    await indexer.tick();
+    stubEvents([], 150);
+    await indexer.tick();
+    failing();
+    await indexer.tick();
+
+    const pollErrors = log.error.mock.calls.filter(([, msg]) => msg === 'indexer poll failed');
+    expect(pollErrors).toHaveLength(2);
+  });
+
+  it('stops backing off once it is only standing by for the lease', async () => {
+    failing();
+    const holder = new Indexer(fakeLog());
+    const standby = new Indexer(fakeLog());
+
+    try {
+      // A streak built up while this instance was the one polling...
+      await standby.tick();
+      expect(standby.failureStreak).toBe(1);
+
+      // ...and then another instance takes the cursor. A full cycle is the
+      // only thing that decides standby, so it is driven directly here.
+      await holder.start();
+      await standby['cycle']();
+
+      // Waiting for a lease attempts no RPC call, so it is not a failure
+      // and must not leave this instance retrying a minute apart.
+      expect(standby.failureStreak).toBe(0);
+    } finally {
+      await standby.stop();
+      await holder.stop();
+    }
+  });
+
+  it('does not treat a healthy poll as a failure', async () => {
+    stubEvents([], 150);
+    const indexer = new Indexer(fakeLog());
+
+    await indexer.tick();
+
+    expect(indexer.failureStreak).toBe(0);
+  });
+});
+
+describe('faucet drips', () => {
+  const WALLET = 'GDUPJTF3PNSYJ73WWLNTYLG6UXN7HHBKCGFEEMDFMWKWGR3UMQT3JG45';
+  const OTHER_WALLET = 'GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK';
+
+  function drip(wallet: string, ledger: number, amount = 100000000n) {
+    return rawEvent('dripped', ledger, { amount }, [Address.fromString(wallet).toScVal()]);
+  }
+
+  beforeEach(async () => {
+    await prisma.faucetDrip.deleteMany();
+  });
+
+  it('records the wallet and amount from a drip', async () => {
+    stubEvents([drip(WALLET, 101)], 101);
+
+    await new Indexer(fakeLog()).tick();
+
+    const rows = await prisma.faucetDrip.findMany();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: 'dripped-101',
+      wallet: WALLET,
+      amount: '100000000',
+      ledger: 101,
+    });
+  });
+
+  it('counts one drip per event id, so a replay does not inflate the total', async () => {
+    stubEvents([drip(WALLET, 101)], 101);
+    const indexer = new Indexer(fakeLog());
+
+    await indexer.tick();
+    await prisma.indexerState.update({ where: { id: 1 }, data: { lastLedger: 100 } });
+    await indexer.tick();
+
+    expect(await prisma.faucetDrip.count()).toBe(1);
+  });
+
+  it('keeps separate rows per wallet and per drip', async () => {
+    stubEvents([drip(WALLET, 101), drip(WALLET, 102), drip(OTHER_WALLET, 103)], 103);
+
+    await new Indexer(fakeLog()).tick();
+
+    expect(await prisma.faucetDrip.count()).toBe(3);
+    const wallets = await prisma.faucetDrip.groupBy({ by: ['wallet'] });
+    expect(wallets).toHaveLength(2);
+  });
+
+  it('is not a warned-about unknown event', async () => {
+    stubEvents([drip(WALLET, 101)], 101);
+    const log = fakeLog();
+
+    await new Indexer(log).tick();
+
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('dead-letters a drip whose wallet did not decode', async () => {
+    const broken = rawEvent('dripped', 104, { amount: 1n });
+    stubEvents([broken], 104);
+    const log = fakeLog();
+
+    await new Indexer(log).tick();
+
+    expect(await prisma.faucetDrip.count()).toBe(0);
+    expect(await prisma.failedEvent.count({ where: { id: 'dripped-104' } })).toBe(1);
+    await prisma.failedEvent.deleteMany({ where: { id: 'dripped-104' } });
   });
 });

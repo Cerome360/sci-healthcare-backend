@@ -9,6 +9,7 @@ import {
   decodeEvent,
   providerStatusName,
   TOPIC_FIELDS,
+  voucherStatusName,
 } from '../stellar/events.js';
 
 const CLINIC = 'GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK';
@@ -90,6 +91,20 @@ describe('decodeEvent', () => {
     expect(decoded!.fields.attester).toBe(CLINIC);
   });
 
+  it('decodes a faucet drip, whose wallet is a topic and amount is data', () => {
+    const decoded = decodeEvent(
+      raw(
+        [sym('dripped'), Address.fromString(FUNDER).toScVal()],
+        // `#[contractevent]` publishes non-topic fields as a map, even when
+        // there is only one of them.
+        nativeToScVal({ amount: 100000000n }),
+      ),
+    );
+    expect(decoded!.name).toBe('dripped');
+    expect(decoded!.fields.to).toBe(FUNDER);
+    expect(asAmount(decoded!.fields.amount)).toBe('100000000');
+  });
+
   it('returns null when the first topic is not an event name', () => {
     expect(decodeEvent(raw([nativeToScVal(42)], nativeToScVal({})))).toBeNull();
   });
@@ -120,9 +135,29 @@ describe('TOPIC_FIELDS', () => {
       'admin_proposed',
       'admin_changed',
       'receipt_minted',
+      'dripped',
     ]) {
       expect(TOPIC_FIELDS[name], `${name} has no topic mapping`).toBeDefined();
     }
+  });
+});
+
+describe('voucherStatusName', () => {
+  it('maps every VoucherStatus discriminant to the name the API uses', () => {
+    expect([0, 1, 2, 3, 4, 5].map(voucherStatusName)).toEqual([
+      'Funded',
+      'Claimed',
+      'Attested',
+      'Settled',
+      'Disputed',
+      'Refunded',
+    ]);
+  });
+
+  it('passes a name straight through and flags anything unrecognised', () => {
+    expect(voucherStatusName('Settled')).toBe('Settled');
+    // A contract that gained a status this backend does not know about.
+    expect(voucherStatusName(99)).toBe('Unknown');
   });
 });
 

@@ -65,6 +65,8 @@ The indexer polls on an interval, applies each event to the read model, and only
 
 The cursor is guarded by a lease (stored on `IndexerState`). However many indexer processes are running, exactly one holds the lease and advances the cursor; the others log that they are standing by and retry. Events are idempotent, but the cursor is not — two writers can skip events by advancing it from a stale read — which is the race the lease exists to prevent.
 
+When the RPC fails, the indexer backs off exponentially (with jitter, up to `INDEXER_BACKOFF_MAX_MS`) instead of retrying every poll interval, and reports the failure once per streak rather than once per attempt — retrying at full speed adds load exactly where it hurts and buries every other log line. Configure more than one endpoint in `SOROBAN_RPC_URLS` and repeated failures move reads to the next one; the active endpoint is logged on each switch and reported as `checks.rpcUrl` on `/ready`.
+
 ## API
 
 Every route is served under the canonical `/v1` prefix. The unversioned paths
@@ -179,18 +181,24 @@ npm run dev
 | `CORS_ORIGIN` | Comma-separated allowed origins | `http://localhost:3000` |
 | `READY_MAX_LAG_LEDGERS` | Lag in ledgers at which `/ready` reports degraded | `120` |
 | `DATABASE_URL` | Resolved **relative to `prisma/`** | `file:./dev.db` |
-| `SOROBAN_RPC_URL` | Soroban RPC endpoint | `https://soroban-testnet.stellar.org` |
+| `SOROBAN_RPC_URL` | Soroban RPC endpoint (used when `SOROBAN_RPC_URLS` is unset) | `https://soroban-testnet.stellar.org` |
+| `SOROBAN_RPC_URLS` | Comma-separated endpoints, tried in order on repeated failure | `https://rpc-a.example,https://rpc-b.example` |
+| `SOROBAN_RPC_MAX_FAILURES` | Consecutive failures against one endpoint before switching | `3` |
 | `NETWORK_PASSPHRASE` | Network passphrase | `Test SDF Network ; September 2015` |
 | `REGISTRY_CONTRACT_ID` | Registry contract | `CAMU635NRFEHATJ6MTY5SI43IAZ43KHPFXAQDQAST2AHKCHLSGWHVE4V` |
 | `VOUCHER_CONTRACT_ID` | Voucher escrow | `CBPUQN6CNJCNGPKNEXB7UM4T7RINKQB7HQI5CXEOSQ5EFRHE4G4VKPSQ` |
 | `RECEIPT_CONTRACT_ID` | Care receipts | `CBCJRI2BCZBMZNX77WWDC2NGSV4ZNAN5Q23XHYNBH6UTOQMPJHZGX5C7` |
 | `USDC_CONTRACT_ID` | Settlement token | `CCRLJ7FEIKTR3GBT3VQQPSIJGRBO2WPNMVFKJDP6AYGJQWECOR4QVE5M` |
+| `FAUCET_CONTRACT_ID` | Testnet demo faucet; optional, drips counted in `/stats` when set | `CCB25WG7DQ2CSNXPTOHZO2PDZ324FQPZLH3LSNCCLWYM3FEH52GEXC47` |
 | `INDEXER_START_LEDGER` | Ledger to index from; `0` means start at the tip | `4465529` |
 | `INDEXER_POLL_MS` | Poll interval | `5000` |
+| `INDEXER_BACKOFF_MAX_MS` | Ceiling for the backoff applied after RPC failures | `60000` |
 
 Set `INDEXER_START_LEDGER` to the deployment ledger. Leaving it at `0` starts at the current tip and silently skips all prior history. Soroban RPC also only retains a rolling window of ledgers (about 7 days on testnet) — an indexer that falls further behind than the window cannot catch up, and `/ready` will say so rather than pretend otherwise.
 
 `READY_MAX_LAG_LEDGERS` (default `120`, about ten minutes at five seconds a ledger) is where `/ready` flips from 200 to 503. A free-tier demo can tolerate a much larger window than production, so tune it per deployment. `GET /ready` echoes it as `checks.maxLagLedgers`.
+
+`SOROBAN_RPC_URLS` is the failover list. Set it to two endpoints and an outage at the first one costs a few failed reads rather than an indexing stall; with one endpoint (or only `SOROBAN_RPC_URL` set) the behaviour is exactly as before. `GET /version` reports every configured endpoint and `GET /ready` reports the active one, both with any credentials redacted.
 
 ## Running the indexer and the API separately
 
@@ -251,6 +259,8 @@ A new, empty database needs nothing special.
 
 - **Metrics**: `GET /metrics` is Prometheus text (not rate limited). Alert on `indexer_lag_ledgers` and `indexer_seconds_since_success`; both are set by the process running the indexer.
 - **Failed events**: an event the indexer cannot project is stored in the `FailedEvent` table and `/ready` reports degraded until it is cleared. After fixing the cause, run `npm run indexer:retry-failed`; it exits non-zero while any event still fails.
+- **Reconciliation**: the read model is a cache of the chain, so run `npm run indexer:reconcile` on a schedule. It reads `get_voucher` for every non-terminal voucher (plus a rolling sample of settled ones, `--sample`, default 25) and records each disagreement in `ReconcileMismatch`. `/ready` reports `checks.reconcileMismatches` and `checks.reconcile: "drift"`, but stays 200: unlike a failed event, drift says nothing about whether this instance can serve traffic. `--fix` rewrites the differing rows from chain state, which is the only safe direction. The command exits non-zero while any mismatch is open.
+- **Faucet usage**: with `FAUCET_CONTRACT_ID` set, `dripped` events are indexed into `FaucetDrip` and `/stats` reports `faucetDrips` (total) and `faucetWallets` (distinct wallets) — the closest thing to a count of people who tried the demo.
 
 ## Contributing
 

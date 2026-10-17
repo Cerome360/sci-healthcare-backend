@@ -348,7 +348,28 @@ describe('GET /health and /stats', () => {
       settledVouchers: 1,
       settledValue: '30000000',
       receipts: 2,
+      faucetDrips: 0,
+      faucetWallets: 0,
     });
+  });
+
+  it('counts faucet drips and the distinct wallets behind them', async () => {
+    await prisma.faucetDrip.createMany({
+      data: [
+        { id: 'drip-1', wallet: FUNDER, amount: '100000000', ledger: 10, drippedAt: new Date() },
+        // Same wallet again: more drips, still one person trying the demo.
+        { id: 'drip-2', wallet: FUNDER, amount: '100000000', ledger: 11, drippedAt: new Date() },
+        { id: 'drip-3', wallet: CLINIC, amount: '100000000', ledger: 12, drippedAt: new Date() },
+      ],
+    });
+
+    try {
+      const { body } = await get('/stats');
+      expect(body.faucetDrips).toBe(3);
+      expect(body.faucetWallets).toBe(2);
+    } finally {
+      await prisma.faucetDrip.deleteMany();
+    }
   });
 });
 
@@ -369,6 +390,13 @@ describe('GET /version', () => {
     if (body.rpcUrl.includes('@')) {
       expect(body.rpcUrl).toMatch(/:\/\/\*\*\*@/);
     }
+  });
+
+  it('lists every configured RPC endpoint, with the active one first reported', async () => {
+    const { body } = await get('/version');
+    expect(Array.isArray(body.rpcUrls)).toBe(true);
+    expect(body.rpcUrls).toContain(body.rpcUrl);
+    expect(body.rpcUrls).toEqual(env.RPC_URLS.map((u: string) => u));
   });
 });
 
@@ -398,7 +426,35 @@ describe('GET /ready', () => {
       indexer: 'ok',
       lagLedgers: 120,
       maxLagLedgers: env.READY_MAX_LAG_LEDGERS,
+      rpcUrl: env.SOROBAN_RPC_URL,
+      reconcile: 'ok',
+      reconcileMismatches: 0,
     });
+  });
+
+  it('reports reconciliation drift without taking the instance out of rotation', async () => {
+    await seedCursor(1000);
+    vi.spyOn(server, 'getLatestLedger').mockResolvedValue({ sequence: 1000 } as never);
+    await prisma.reconcileMismatch.create({
+      data: {
+        voucherId: '1',
+        kind: 'field_mismatch',
+        fields: JSON.stringify([{ field: 'status', db: 'Funded', chain: 'Settled' }]),
+        firstSeen: new Date(),
+        lastSeen: new Date(),
+      },
+    });
+
+    try {
+      const { status, body } = await get('/ready');
+      // Drift is a data-quality alarm, not a reason to stop serving.
+      expect(status).toBe(200);
+      expect(body.status).toBe('ready');
+      expect(body.checks.reconcile).toBe('drift');
+      expect(body.checks.reconcileMismatches).toBe(1);
+    } finally {
+      await prisma.reconcileMismatch.deleteMany();
+    }
   });
 
   it('is degraded one ledger past the threshold', async () => {

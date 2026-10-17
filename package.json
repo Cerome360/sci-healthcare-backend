@@ -21,6 +21,7 @@
     "test": "vitest run",
     "indexer:backfill": "tsx src/scripts/backfill.ts",
     "indexer:retry-failed": "tsx src/scripts/retry-failed.ts",
+    "indexer:reconcile": "tsx src/scripts/reconcile.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate deploy",

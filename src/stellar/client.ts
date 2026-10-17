@@ -1,10 +1,26 @@
 import { Address, Contract, rpc, scValToNative, xdr } from '@stellar/stellar-sdk';
+import pino from 'pino';
 
-import { env } from '../env.js';
+import { env, RPC_URLS } from '../env.js';
+import { FailoverRpcServer, RpcPool } from './rpc-pool.js';
 
-export const server = new rpc.Server(env.SOROBAN_RPC_URL, {
-  allowHttp: env.SOROBAN_RPC_URL.startsWith('http://'),
+/**
+ * The pool logs endpoint switches, which matter whichever process hit them,
+ * so it gets its own logger rather than the request or indexer logger.
+ */
+const log = pino({ level: env.LOG_LEVEL, name: 'soroban-rpc' });
+
+export const pool = new RpcPool(RPC_URLS, {
+  maxFailures: env.SOROBAN_RPC_MAX_FAILURES,
+  log,
 });
+
+/**
+ * Every Soroban read in this service goes through here. It is an
+ * `rpc.Server` in all but type: calls are routed to whichever configured
+ * endpoint is healthy (see `rpc-pool.ts`).
+ */
+export const server = new FailoverRpcServer(pool);
 
 /**
  * Reads a contract view function without submitting a transaction.

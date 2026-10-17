@@ -175,3 +175,41 @@ model IndexerState {
   /// Cursor ledger at the time the gap was detected.
   gapCursorLedger Int?
 }
+
+/// One drip from the testnet demo faucet.
+///
+/// Keyed by the on-chain event id rather than counted into a single row, so
+/// a replay is idempotent like every other handler. Keeping the wallet is
+/// what lets `/stats` separate "how many drips" from "how many people".
+/// Only populated when `FAUCET_CONTRACT_ID` is configured.
+model FaucetDrip {
+  id        String   @id // on-chain event id
+  wallet    String
+  amount    String // i128 as decimal string
+  ledger    Int
+  drippedAt DateTime
+
+  @@index([wallet])
+  @@index([ledger])
+}
+
+/// A voucher whose stored row disagrees with the contract.
+///
+/// The read model is a cache of the chain, and a missed or mis-decoded event
+/// leaves it quietly wrong. `npm run indexer:reconcile` compares stored
+/// vouchers against `get_voucher` and writes what it found here; the row is
+/// deleted as soon as a later run (or `--fix`) sees them agree, so a
+/// non-empty table always means open drift.
+model ReconcileMismatch {
+  voucherId String   @id
+  /// field_mismatch | missing_on_chain
+  kind      String
+  /// JSON array of `{ field, db, chain }`, one entry per differing field.
+  fields    String
+  /// How many consecutive runs have seen this mismatch.
+  runs      Int      @default(1)
+  firstSeen DateTime
+  lastSeen  DateTime
+
+  @@index([kind])
+}

@@ -67,6 +67,37 @@ export function nextPollDelay(hasMore: boolean, pollMs: number): number {
   return hasMore ? 0 : pollMs;
 }
 
+/** Fraction of the delay added as jitter, so retries do not synchronise. */
+export const BACKOFF_JITTER = 0.25;
+
+/** Guards `2 ** exponent` against overflowing to Infinity on a long outage. */
+const MAX_EXPONENT = 30;
+
+/**
+ * How long to wait after `failures` consecutive failed cycles.
+ *
+ * Retrying a struggling RPC every poll interval adds load exactly where it
+ * hurts and fills the log with the same error, so each failure doubles the
+ * wait up to `maxMs`. Jitter keeps several instances (or several services
+ * sharing one public endpoint) from retrying in lockstep.
+ *
+ * The result is always in `[delay, min(maxMs, delay * (1 + BACKOFF_JITTER))]`
+ * where `delay = min(maxMs, baseMs * 2 ** (failures - 1))`, and is never
+ * above `maxMs`. Zero failures means no backoff: the caller's normal poll
+ * interval applies.
+ */
+export function nextDelay(
+  failures: number,
+  baseMs: number = env.INDEXER_POLL_MS,
+  maxMs: number = env.INDEXER_BACKOFF_MAX_MS,
+  random: () => number = Math.random,
+): number {
+  if (failures <= 0) return baseMs;
+  const exponent = Math.min(failures - 1, MAX_EXPONENT);
+  const delay = Math.min(maxMs, baseMs * 2 ** exponent);
+  return Math.min(maxMs, Math.round(delay * (1 + random() * BACKOFF_JITTER)));
+}
+
 export type IndexerOptions = {
   /** Overridable for tests; defaults to a lease over this database. */
   lease?: IndexerLease;
@@ -82,6 +113,8 @@ export class Indexer {
   private holdsLease = false;
   /** Unknown event names already warned about; one warning per process. */
   private readonly unknownEvents = new Set<string>();
+  /** Consecutive failed cycles; drives the backoff and is reset on success. */
+  private failures = 0;
   private readonly lease: IndexerLease;
 
   constructor(
@@ -144,10 +177,16 @@ export class Indexer {
         }
         return;
       }
-      if (this.holdsLease) await this.tick();
+      if (this.holdsLease) {
+        await this.tick();
+      } else {
+        // Standing by is not a failure. Nothing was attempted against the
+        // RPC, so an earlier streak must not keep this instance backing
+        // off while it is only waiting for the lease to come free.
+        this.failures = 0;
+      }
     } catch (err) {
-      this.log.error({ err }, 'indexer lease check failed');
-      this.hasMore = false;
+      this.noteFailure(err, 'indexer lease check failed');
     } finally {
       this.schedule();
     }
@@ -171,10 +210,45 @@ export class Indexer {
 
   private schedule(): void {
     if (this.stopped) return;
-    const delay = nextPollDelay(this.hasMore && this.holdsLease, env.INDEXER_POLL_MS);
+    const delay =
+      this.failures > 0
+        ? nextDelay(this.failures)
+        : nextPollDelay(this.hasMore && this.holdsLease, env.INDEXER_POLL_MS);
     this.timer = setTimeout(() => {
       void this.cycle();
     }, delay);
+  }
+
+  /** Consecutive failed cycles. Exposed for tests and for the backoff. */
+  get failureStreak(): number {
+    return this.failures;
+  }
+
+  /**
+   * Records a failed cycle.
+   *
+   * The whole streak is one incident, so it is reported once at full
+   * volume; the attempts in between are debug-level, which keeps an hour
+   * of RPC downtime from burying everything else in the log.
+   */
+  private noteFailure(err: unknown, msg: string): void {
+    this.failures += 1;
+    this.hasMore = false;
+    if (this.failures === 1) {
+      this.log.error({ err }, msg);
+    } else {
+      this.log.debug(
+        { err, failures: this.failures, nextDelayMs: nextDelay(this.failures) },
+        `${msg} (retrying with backoff)`,
+      );
+    }
+  }
+
+  /** Records a cycle that worked, ending any backoff. */
+  private noteSuccess(): void {
+    if (this.failures === 0) return;
+    this.log.info({ afterFailures: this.failures }, 'indexer recovered');
+    this.failures = 0;
   }
 
   /** Exposed for tests and for a manual catch-up endpoint. */
@@ -182,10 +256,11 @@ export class Indexer {
     if (this.running) return 0;
     this.running = true;
     try {
-      return await this.poll();
+      const applied = await this.poll();
+      this.noteSuccess();
+      return applied;
     } catch (err) {
-      this.log.error({ err }, 'indexer poll failed');
-      this.hasMore = false;
+      this.noteFailure(err, 'indexer poll failed');
       return 0;
     } finally {
       this.running = false;
@@ -356,6 +431,9 @@ export class Indexer {
         break;
       case 'receipt_minted':
         await this.onReceiptMinted(db, d);
+        break;
+      case 'dripped':
+        await this.onDripped(db, e);
         break;
       default:
         // Known-but-unprojected events stay silent; anything else is a name
@@ -532,6 +610,29 @@ export class Indexer {
     await db.voucher.updateMany({
       where: { id },
       data: { status, ...extra },
+    });
+  }
+
+  /**
+   * Records one testnet faucet drip.
+   *
+   * A row per event rather than a bare counter: replay is idempotent only
+   * if the key is the on-chain event id, and keeping the wallet is what
+   * lets `/stats` report how many distinct people tried the demo rather
+   * than how many times anyone pressed the button.
+   */
+  private async onDripped(db: Db, e: DecodedEvent): Promise<void> {
+    const d = e.fields;
+    await db.faucetDrip.upsert({
+      where: { id: e.id },
+      create: {
+        id: e.id,
+        wallet: asAddress(d.to),
+        amount: asAmount(d.amount),
+        ledger: e.ledger,
+        drippedAt: e.ledgerClosedAt,
+      },
+      update: {},
     });
   }
 

@@ -30,6 +30,8 @@ export const TOPIC_FIELDS: Record<string, readonly string[]> = {
   admin_proposed: ['admin'],
   admin_changed: [],
   receipt_minted: ['beneficiary_ref', 'provider'],
+  // Testnet faucet; only reaches the indexer when FAUCET_CONTRACT_ID is set.
+  dripped: ['to'],
 };
 
 export type DecodedEvent = {
@@ -154,4 +156,25 @@ export function providerStatusName(input: unknown): string {
   if (typeof input === 'string') return input;
   const index = asNumber(input);
   return PROVIDER_STATUS[index] ?? 'Unknown';
+}
+
+/**
+ * `VoucherStatus` discriminants, in contract declaration order.
+ *
+ * Only `get_voucher` reads this: the lifecycle events each carry their own
+ * status, so the indexer never has to decode the enum from an event.
+ */
+export const VOUCHER_STATUS = [
+  'Funded',
+  'Claimed',
+  'Attested',
+  'Settled',
+  'Disputed',
+  'Refunded',
+] as const;
+
+export function voucherStatusName(input: unknown): string {
+  if (typeof input === 'string') return input;
+  const index = asNumber(input);
+  return VOUCHER_STATUS[index] ?? 'Unknown';
 }
