@@ -316,7 +316,12 @@ ${key}`,
     if (data.state === 'open') {
       await github.rest.issues
         .update({ owner, repo, issue_number: issue.number, state: 'closed', state_reason: 'completed' })
-        .catch((e) => core.warning(`could not close #${issue.number}: ${e.message}`));
+        .catch((e) => {
+          // GitHub's own closing keywords often win the race; that is fine.
+          if (!/closed by another request/i.test(e.message)) {
+            core.warning(`could not close #${issue.number}: ${e.message}`);
+          }
+        });
     }
     closed.push(`#${issue.number}`);
   }
