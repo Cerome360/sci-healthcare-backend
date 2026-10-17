@@ -24,6 +24,13 @@ npm run typecheck
 npm test
 ```
 
+### Optional: pre-commit lint hook
+
+Run `npm install` once and the `prepare` script installs a git pre-commit hook
+that runs ESLint on staged files. This catches lint errors locally before CI.
+The hook is optional — contributors who prefer not to use it can skip it, but
+CI still enforces the same rules.
+
 ## Non-negotiables
 
 - **The database is a projection, never a source of truth.** Deleting it and

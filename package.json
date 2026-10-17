@@ -23,7 +23,8 @@
     "indexer:retry-failed": "tsx src/scripts/retry-failed.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
-    "db:migrate": "prisma migrate deploy"
+    "db:migrate": "prisma migrate deploy",
+    "prepare": "husky"
   },
   "dependencies": {
     "@fastify/cors": "11.1.0",
@@ -43,10 +44,17 @@
     "@eslint/js": "9.39.5",
     "@types/node": "22.10.5",
     "eslint": "9.39.5",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
     "prisma": "6.19.3",
     "tsx": "4.19.2",
     "typescript": "5.7.3",
     "typescript-eslint": "8.71.1",
     "vitest": "2.1.8"
+  },
+  "lint-staged": {
+    "src/**/*.{ts,js}": [
+      "eslint --fix"
+    ]
   }
 }
