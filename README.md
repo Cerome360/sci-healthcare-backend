@@ -179,31 +179,287 @@ is a different tag. `/health`, `/ready`, `/metrics` and `/openapi.json` are
 `Cache-Control: no-store`, as is every error response. Nothing is cached
 server-side, so any instance can validate a tag produced by another.
 
-### Example
+### Endpoints and Examples
 
-```bash
-curl "http://localhost:8080/v1/providers?status=Active" | jq
-curl "http://localhost:8080/v1/vouchers?provider=GDOOCNK2...ZKBK" | jq
-curl -o vouchers.csv "http://localhost:8080/v1/vouchers.csv?funder=GDUPJTF3...G45"
-curl -N "http://localhost:8080/v1/stream?voucher=420001"
-```
+#### 1. Operations & System
+- **`GET /health`**: Quick liveness probe.
+  ```bash
+  curl http://localhost:8080/health
+  ```
+  ```json
+  { "status": "ok", "time": "2026-09-02T12:00:00.000Z" }
+  ```
+- **`GET /ready`**: Readiness probe checking database connectivity and indexer sync lag.
+  ```bash
+  curl http://localhost:8080/ready
+  ```
+  ```json
+  { "status": "ok", "indexer": { "latestLedger": 4465530, "targetLedger": 4465530, "lag": 0 } }
+  ```
+- **`GET /version`**: Application version and git commit metadata.
+  ```bash
+  curl http://localhost:8080/version
+  ```
+  ```json
+  { "version": "0.2.0", "commit": "44b3de9" }
+  ```
+- **`GET /metrics`**: Prometheus metrics for HTTP traffic, latency, and indexer state.
+  ```bash
+  curl http://localhost:8080/metrics
+  ```
+  ```text
+  # HELP http_requests_total Total number of HTTP requests
+  # TYPE http_requests_total counter
+  http_requests_total{method="GET",route="/health",status="200"} 42
+  ```
 
-```json
-{
-  "total": 1,
-  "providers": [
-    {
-      "address": "GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK",
-      "name": "Ikeja General Clinic",
-      "country": "NG",
-      "status": "Active",
-      "services": [
-        { "code": 101, "label": "Outpatient consult", "price": "30000000", "priceDisplay": "3.0000000" }
-      ]
-    }
-  ]
-}
-```
+#### 2. Healthcare Providers
+- **`GET /v1/providers`**: List registered clinics with active services, filtered by status, country, or name search.
+  ```bash
+  curl "http://localhost:8080/v1/providers?status=Active&country=NG&limit=10"
+  ```
+  ```json
+  {
+    "total": 1,
+    "providers": [
+      {
+        "address": "GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK",
+        "name": "Ikeja General Clinic",
+        "country": "NG",
+        "status": "Active",
+        "registeredAt": "2026-09-01T08:00:00.000Z",
+        "services": [
+          { "code": 101, "label": "Outpatient consult", "price": "30000000", "priceDisplay": "3.0000000" }
+        ]
+      }
+    ]
+  }
+  ```
+- **`GET /v1/providers/:address`**: Fetch details of a single provider by Stellar address.
+  ```bash
+  curl http://localhost:8080/v1/providers/GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK
+  ```
+  ```json
+  {
+    "address": "GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK",
+    "name": "Ikeja General Clinic",
+    "country": "NG",
+    "status": "Active",
+    "services": [
+      { "code": 101, "label": "Outpatient consult", "price": "30000000", "priceDisplay": "3.0000000" }
+    ]
+  }
+  ```
+
+#### 3. Medical Services Catalog
+- **`GET /v1/services`**: List all medical services offered across active providers.
+  ```bash
+  curl "http://localhost:8080/v1/services?provider=GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK"
+  ```
+  ```json
+  {
+    "services": [
+      {
+        "code": 101,
+        "label": "Outpatient consult",
+        "provider": "GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK",
+        "price": "30000000",
+        "priceDisplay": "3.0000000",
+        "active": true
+      }
+    ]
+  }
+  ```
+- **`GET /v1/services/:code`**: Look up active offerings for a standard service code.
+  ```bash
+  curl http://localhost:8080/v1/services/101
+  ```
+  ```json
+  {
+    "code": 101,
+    "providers": [
+      {
+        "address": "GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK",
+        "name": "Ikeja General Clinic",
+        "price": "30000000",
+        "priceDisplay": "3.0000000"
+      }
+    ]
+  }
+  ```
+
+#### 4. Vouchers & Protocol Statistics
+- **`GET /v1/vouchers`**: Filter vouchers by funder, provider, beneficiary reference, or status.
+  ```bash
+  curl "http://localhost:8080/v1/vouchers?status=Funded&limit=10"
+  ```
+  ```json
+  {
+    "total": 1,
+    "vouchers": [
+      {
+        "id": "1",
+        "funder": "GDUPJTF3PNSYJ73WWLNTYLG6UXN7HHBKCGFEEMDFMWKWGR3UMQT3JG45",
+        "beneficiaryRef": "72676a6f4fff92b09ab1c6368672b05112062f683014d07c9518d4141d094745",
+        "provider": "GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK",
+        "serviceCode": 101,
+        "amount": "30000000",
+        "amountDisplay": "3.0000000",
+        "status": "Funded",
+        "createdAt": "2026-09-02T10:00:00.000Z",
+        "expiresAt": "2026-09-09T10:00:00.000Z"
+      }
+    ]
+  }
+  ```
+- **`GET /v1/vouchers/:id`**: Get full state and current lifecycle status of a voucher.
+  ```bash
+  curl http://localhost:8080/v1/vouchers/1
+  ```
+  ```json
+  {
+    "id": "1",
+    "funder": "GDUPJTF3PNSYJ73WWLNTYLG6UXN7HHBKCGFEEMDFMWKWGR3UMQT3JG45",
+    "beneficiaryRef": "72676a6f4fff92b09ab1c6368672b05112062f683014d07c9518d4141d094745",
+    "provider": "GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK",
+    "serviceCode": 101,
+    "amount": "30000000",
+    "amountDisplay": "3.0000000",
+    "status": "Funded",
+    "createdAt": "2026-09-02T10:00:00.000Z",
+    "expiresAt": "2026-09-09T10:00:00.000Z"
+  }
+  ```
+- **`GET /v1/vouchers/:id/events`**: Chronological event history for a voucher.
+  ```bash
+  curl http://localhost:8080/v1/vouchers/1/events
+  ```
+  ```json
+  {
+    "events": [
+      {
+        "type": "VoucherCreated",
+        "ledger": 4465529,
+        "timestamp": "2026-09-02T10:00:00.000Z",
+        "txHash": "abc123def456"
+      }
+    ]
+  }
+  ```
+- **`GET /v1/vouchers/due`**: Unredeemed vouchers nearing expiration.
+  ```bash
+  curl "http://localhost:8080/v1/vouchers/due?withinHours=24"
+  ```
+  ```json
+  {
+    "total": 1,
+    "vouchers": [
+      { "id": "1", "status": "Funded", "expiresAt": "2026-09-03T10:00:00.000Z" }
+    ]
+  }
+  ```
+- **`GET /v1/vouchers.csv`**: Export voucher records as standard CSV for donor reporting and accounting.
+  ```bash
+  curl -o vouchers.csv "http://localhost:8080/v1/vouchers.csv?funder=GDUPJTF3PNSYJ73WWLNTYLG6UXN7HHBKCGFEEMDFMWKWGR3UMQT3JG45"
+  ```
+- **`GET /v1/stats`**: High-level protocol metrics including total volume and voucher counters.
+  ```bash
+  curl http://localhost:8080/v1/stats
+  ```
+  ```json
+  {
+    "vouchers": { "funded": 100, "redeemed": 85, "cancelled": 5, "expired": 10 },
+    "volumeTotal": "3000000000",
+    "volumeDisplay": "300.0000000"
+  }
+  ```
+
+#### 5. Care Receipts
+- **`GET /v1/receipts`**: List anonymized care receipts minted on redemption.
+  ```bash
+  curl "http://localhost:8080/v1/receipts?provider=GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK&limit=10"
+  ```
+  ```json
+  {
+    "total": 1,
+    "receipts": [
+      {
+        "id": "1",
+        "voucherId": "1",
+        "provider": "GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK",
+        "serviceCode": 101,
+        "amount": "30000000",
+        "mintedAt": "2026-09-02T14:30:00.000Z"
+      }
+    ]
+  }
+  ```
+- **`GET /v1/receipts/:id`**: Get care receipt by id.
+  ```bash
+  curl http://localhost:8080/v1/receipts/1
+  ```
+  ```json
+  {
+    "id": "1",
+    "voucherId": "1",
+    "provider": "GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK",
+    "serviceCode": 101,
+    "amount": "30000000",
+    "mintedAt": "2026-09-02T14:30:00.000Z"
+  }
+  ```
+
+#### 6. Governance & Protocol Administration
+- **`GET /v1/governance/proposals`**: List DAO proposals and voting states.
+  ```bash
+  curl "http://localhost:8080/v1/governance/proposals?status=Active"
+  ```
+  ```json
+  {
+    "proposals": [
+      {
+        "id": 1,
+        "title": "Add Nairobi Health Clinic",
+        "status": "Active",
+        "yesVotes": "50000000",
+        "noVotes": "0"
+      }
+    ]
+  }
+  ```
+- **`GET /v1/governance/proposals/:id`**: Detailed proposal votes and execution target.
+  ```bash
+  curl http://localhost:8080/v1/governance/proposals/1
+  ```
+  ```json
+  {
+    "id": 1,
+    "title": "Add Nairobi Health Clinic",
+    "status": "Active",
+    "proposer": "GDUPJTF3PNSYJ73WWLNTYLG6UXN7HHBKCGFEEMDFMWKWGR3UMQT3JG45"
+  }
+  ```
+- **`GET /v1/governance/history`**: Admin actions and parameter updates log.
+  ```bash
+  curl http://localhost:8080/v1/governance/history
+  ```
+  ```json
+  {
+    "history": [
+      { "action": "ProviderApproved", "target": "GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK", "ledger": 4465520 }
+    ]
+  }
+  ```
+
+#### 7. Real-Time Server-Sent Events (SSE)
+- **`GET /v1/stream`**: Real-time event stream subscribing to voucher and protocol events.
+  ```bash
+  curl -N "http://localhost:8080/v1/stream?voucher=1"
+  ```
+  ```text
+  event: voucher_update
+  data: {"id":"1","status":"Redeemed","updatedAt":"2026-09-02T14:30:00.000Z"}
+  ```
 
 Amounts are `i128` on chain and are returned as **decimal strings**. Parsing one into a JavaScript number loses precision above 2^53 — use `BigInt`.
 
