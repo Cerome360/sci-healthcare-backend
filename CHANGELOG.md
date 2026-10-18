@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **Telegram bot example for clinics** (#77): added `examples/telegram-bot/` implementing a microservice that verifies `X-SCI-Signature` HMAC-SHA256 signatures on webhook notifications and relays voucher updates to a clinic's Telegram chat without exposing beneficiary references. Tests in `src/__tests__/telegram-bot.test.ts`.
 - **API Privacy and Data Disclosure Documentation** (#76): added `docs/privacy.md` detailing the data exposed by every API endpoint, audience permissions, on-chain data origins, and patient privacy justifications.
 - **Endpoint curl examples** (#74): added complete, runnable curl examples with trimmed responses for every endpoint across system operations, providers, services, vouchers, receipts, governance, and real-time SSE streams in `README.md`.
 - **HTTP caching on the read API** (#18): every list and detail route now sends `Cache-Control: public, max-age=5, stale-while-revalidate=30` and a weak `ETag` built from `IndexerState.lastLedger` plus the exact request URL. A repeated request whose `If-None-Match` matches gets `304 Not Modified` with no body, and a new ledger invalidates every tag. `/health` and `/ready` (plus `/metrics` and the OpenAPI document) are explicitly `no-store`, and so is any error response. The behaviour lives in the app-level `onSend` hook in `src/app.ts`, so no route had to change. Tests in `src/__tests__/routes.test.ts`.

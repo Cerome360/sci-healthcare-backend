@@ -1,0 +1,16 @@
+{
+  "name": "@sci-healthcare/example-telegram-bot",
+  "version": "0.1.0",
+  "description": "Example Telegram notification bot for clinics receiving signed webhooks",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

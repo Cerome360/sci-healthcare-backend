@@ -179,6 +179,10 @@ is a different tag. `/health`, `/ready`, `/metrics` and `/openapi.json` are
 `Cache-Control: no-store`, as is every error response. Nothing is cached
 server-side, so any instance can validate a tag produced by another.
 
+### Examples
+
+- **Telegram Bot for Clinics**: [`examples/telegram-bot/`](examples/telegram-bot/README.md) demonstrates how clinic microservices verify `X-SCI-Signature` HMAC-SHA256 signatures on webhook notifications and post real-time voucher alerts without exposing patient/beneficiary data.
+
 ### Endpoints and Examples
 
 #### 1. Operations & System
