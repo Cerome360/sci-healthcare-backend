@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **API Privacy and Data Disclosure Documentation** (#76): added `docs/privacy.md` detailing the data exposed by every API endpoint, audience permissions, on-chain data origins, and patient privacy justifications.
 - **Endpoint curl examples** (#74): added complete, runnable curl examples with trimmed responses for every endpoint across system operations, providers, services, vouchers, receipts, governance, and real-time SSE streams in `README.md`.
 - **HTTP caching on the read API** (#18): every list and detail route now sends `Cache-Control: public, max-age=5, stale-while-revalidate=30` and a weak `ETag` built from `IndexerState.lastLedger` plus the exact request URL. A repeated request whose `If-None-Match` matches gets `304 Not Modified` with no body, and a new ledger invalidates every tag. `/health` and `/ready` (plus `/metrics` and the OpenAPI document) are explicitly `no-store`, and so is any error response. The behaviour lives in the app-level `onSend` hook in `src/app.ts`, so no route had to change. Tests in `src/__tests__/routes.test.ts`.
 - **Idempotency regression test** (#20): `src/__tests__/idempotency.test.ts` feeds one page covering every handler through the indexer twice, resets the cursor in between to mimic a crash before the cursor commit, and compares every table before and after. A handler that appended or incremented instead of upserting on the on-chain event id now fails CI. The rule is also called out in `CONTRIBUTING.md`.
