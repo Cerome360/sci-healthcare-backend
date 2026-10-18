@@ -35,6 +35,7 @@ import {
 import { recordFailure } from './failed.js';
 import { IndexerLease } from './lease.js';
 import { collectEvents } from './paging.js';
+import { withSpan } from '../tracing.js';
 
 type Db = Prisma.TransactionClient;
 
@@ -209,7 +210,7 @@ export class Indexer {
       const from =
         env.INDEXER_START_LEDGER > 0
           ? env.INDEXER_START_LEDGER
-          : (await server.getLatestLedger()).sequence;
+          : (await withSpan('rpc.getLatestLedger', () => server.getLatestLedger())).sequence;
       // upsert, not create: two instances booting together must not race to
       // insert the one row.
       await prisma.indexerState.upsert({
@@ -431,7 +432,14 @@ export class Indexer {
     if (this.running) return 0;
     this.running = true;
     try {
-      const applied = await this.poll();
+      const applied = await withSpan(
+        'indexer.cycle',
+        async (span) => {
+          const n = await this.poll();
+          span.setAttribute('indexer.events_applied', n);
+          return n;
+        },
+      );
       this.noteSuccess();
       return applied;
     } catch (err) {
@@ -513,7 +521,7 @@ export class Indexer {
     const state = await prisma.indexerState.findUniqueOrThrow({ where: { id: 1 } });
     const startLedger = state.lastLedger + 1;
 
-    const health = await server.getHealth();
+    const health = await withSpan('rpc.getHealth', () => server.getHealth());
     if (startLedger < health.oldestLedger) {
       if (!state.gap) {
         await prisma.indexerState.update({
@@ -543,10 +551,14 @@ export class Indexer {
       return 0;
     }
 
-    const { events, throughLedger, hasMore } = await collectEvents(server, {
-      startLedger,
-      contractIds: INDEXED_CONTRACTS,
-    });
+    const { events, throughLedger, hasMore } = await withSpan(
+      'rpc.getContractEvents',
+      () =>
+        collectEvents(server, {
+          startLedger,
+          contractIds: INDEXED_CONTRACTS,
+        }),
+    );
     this.hasMore = hasMore;
 
     const advanceTo = Math.max(state.lastLedger, throughLedger);
@@ -559,46 +571,57 @@ export class Indexer {
     // The whole cycle commits together with the cursor: a crash anywhere
     // leaves both untouched and the next poll replays the same range. Each
     // event runs in a savepoint so one failing event rolls back only itself.
-    await prisma.$transaction(
-      async (tx) => {
-        for (const raw of events) {
-          const decoded = decodeEvent(raw as never);
-          if (!decoded) continue;
-          await tx.$executeRawUnsafe('SAVEPOINT event');
-          try {
-            const signal = await this.project(decoded, tx);
-            await tx.$executeRawUnsafe('RELEASE SAVEPOINT event');
-            applied += 1;
-            if (signal) pending.push(signal);
-            appliedByName.set(decoded.name, (appliedByName.get(decoded.name) ?? 0) + 1);
-          } catch (err) {
-            await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT event');
-            await tx.$executeRawUnsafe('RELEASE SAVEPOINT event');
-            // One malformed event must not wedge the whole pipeline. It is
-            // kept in FailedEvent so the gap in the read model is durable,
-            // and the tx hash and ledger make it reproducible.
-            await recordFailure(tx, raw as never, decoded, err);
-            skippedByName.set(decoded.name, (skippedByName.get(decoded.name) ?? 0) + 1);
-            this.log.warn(
-              {
-                err,
-                event: decoded.name,
-                id: decoded.id,
-                txHash: decoded.txHash,
-                ledger: decoded.ledger,
-              },
-              'event skipped',
-            );
-          }
-        }
+    //
+    // The span around it is the honest "database queries" half of the cycle:
+    // it is bounded by the commit itself, so a slow transaction is visible
+    // even before per-query Prisma instrumentation is considered (#54).
+    await withSpan(
+      'db.transaction',
+      async (span) => {
+        span.setAttribute('indexer.ledger.start', state.lastLedger);
+        span.setAttribute('indexer.ledger.through', advanceTo);
+        return prisma.$transaction(
+          async (tx) => {
+            for (const raw of events) {
+              const decoded = decodeEvent(raw as never);
+              if (!decoded) continue;
+              await tx.$executeRawUnsafe('SAVEPOINT event');
+              try {
+                const signal = await this.project(decoded, tx);
+                await tx.$executeRawUnsafe('RELEASE SAVEPOINT event');
+                applied += 1;
+                if (signal) pending.push(signal);
+                appliedByName.set(decoded.name, (appliedByName.get(decoded.name) ?? 0) + 1);
+              } catch (err) {
+                await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT event');
+                await tx.$executeRawUnsafe('RELEASE SAVEPOINT event');
+                // One malformed event must not wedge the whole pipeline. It is
+                // kept in FailedEvent so the gap in the read model is durable,
+                // and the tx hash and ledger make it reproducible.
+                await recordFailure(tx, raw as never, decoded, err);
+                skippedByName.set(decoded.name, (skippedByName.get(decoded.name) ?? 0) + 1);
+                this.log.warn(
+                  {
+                    err,
+                    event: decoded.name,
+                    id: decoded.id,
+                    txHash: decoded.txHash,
+                    ledger: decoded.ledger,
+                  },
+                  'event skipped',
+                );
+              }
+            }
 
-        await tx.indexerState.update({
-          where: { id: 1 },
-          data: { lastLedger: advanceTo },
-        });
+            await tx.indexerState.update({
+              where: { id: 1 },
+              data: { lastLedger: advanceTo },
+            });
+          },
+          // Sized for a busy range on a remote database, not the 5s default.
+          { timeout: 120_000, maxWait: 10_000 },
+        );
       },
-      // Sized for a busy range on a remote database, not the 5s default.
-      { timeout: 120_000, maxWait: 10_000 },
     );
 
     // Counted after the commit so a rolled-back cycle is not double counted

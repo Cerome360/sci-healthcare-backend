@@ -58,3 +58,6 @@ The SCI Healthcare backend is a **public, unauthenticated read-only indexer** fo
 
 4. **Auditability Without Surveillance:**
    The design strikes a deliberate balance: donors and auditors can verify that funds were disbursed to legitimate clinics for healthcare services, while patient dignity and medical privacy are unconditionally preserved.
+
+5. **Request Log Redaction:**
+   `GET /vouchers` and `GET /receipts` take `beneficiaryRef` as a query filter, and the HTTP server logs the request URL of every request. Logs are retained longer and shared more widely than the database, and a reference links one patient's visits together, so the Fastify request serializer masks the parameter to `beneficiaryRef=%5Bredacted%5D` before any log line is written (`src/lib/log-redaction.ts`, wired through `withRedactedLogging` in `src/app.ts`). The filter's presence stays visible for operators; the reference itself never is. Error log lines carry the failure reason only — validation messages name the failing parameter and never echo its value. Asserted in `src/__tests__/log-redaction.test.ts`.

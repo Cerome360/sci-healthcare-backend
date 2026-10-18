@@ -7,7 +7,11 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
-import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
+import Fastify, {
+  type FastifyInstance,
+  type FastifyRequest,
+  type FastifyServerOptions,
+} from 'fastify';
 import {
   jsonSchemaTransform,
   serializerCompiler,
@@ -24,6 +28,7 @@ import {
   NO_STORE,
 } from './lib/cache.js';
 import { errorEnvelope } from './lib/errors.js';
+import { redactBeneficiaryRef } from './lib/log-redaction.js';
 import { httpDuration, httpRequests, registry } from './lib/metrics.js';
 import { APP_VERSION } from './lib/version.js';
 import { governanceRoutes } from './routes/governance.js';
@@ -52,6 +57,39 @@ export type BuildAppOptions = {
   logger?: FastifyServerOptions['logger'];
 };
 
+/**
+ * The request half of a log line (`incoming request`, `request completed`)
+ * is serialized here instead of by Fastify's default, so the `beneficiaryRef`
+ * query parameter is masked before it reaches the log (#55). The shape is
+ * deliberately the same fields the default serializer emits, with only the
+ * URL run through `redactBeneficiaryRef`. Error logs carry `{ err }` only —
+ * validation messages name the failing parameter but never echo its value.
+ */
+function serializeRequestForLog(req: FastifyRequest): Record<string, unknown> {
+  return {
+    method: req.method,
+    url: redactBeneficiaryRef(req.url),
+    version: req.headers['accept-version'],
+    host: req.host,
+    remoteAddress: req.ip,
+    remotePort: req.socket.remotePort,
+  };
+}
+
+type LoggerOption = NonNullable<FastifyServerOptions['logger']>;
+
+function withRedactedLogging(logger: FastifyServerOptions['logger']): LoggerOption | false {
+  if (!logger) return false;
+  // A ready-made logger instance is the caller's; only the plain options
+  // object can be extended with our request serializer.
+  if (typeof logger !== 'object' || !('level' in logger)) return logger as LoggerOption;
+  const options = logger as { serializers?: Record<string, (value: unknown) => unknown> } & object;
+  return {
+    ...options,
+    serializers: { ...options.serializers, req: serializeRequestForLog },
+  } as LoggerOption;
+}
+
 async function registerRoutes(scope: FastifyInstance): Promise<void> {
   await scope.register(healthRoutes);
   await scope.register(providerRoutes);
@@ -72,7 +110,7 @@ export async function buildApp(
   opts: BuildAppOptions = { logger: { level: env.LOG_LEVEL } },
 ): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: opts.logger ?? false,
+    logger: withRedactedLogging(opts.logger),
     trustProxy: true,
     genReqId,
   });

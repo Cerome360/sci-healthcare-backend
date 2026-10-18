@@ -2,6 +2,7 @@ import { buildApp } from './app.js';
 import { disconnect } from './db.js';
 import { env } from './env.js';
 import { Indexer } from './stellar/indexer.js';
+import { startTracingIfConfigured } from './tracing.js';
 
 /**
  * SCI Healthcare API.
@@ -12,6 +13,9 @@ import { Indexer } from './stellar/indexer.js';
  * it exists to make on-chain state queryable, which the ledger alone is not.
  */
 async function main(): Promise<void> {
+  // No-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set (#54).
+  startTracingIfConfigured();
+
   const app = await buildApp();
 
   const indexer = new Indexer(app.log);
