@@ -70,6 +70,22 @@ describe('beneficiaryRef redaction in request logs (#55)', () => {
     expect(lines.some((l) => l.includes('incoming request'))).toBe(true);
   });
 
+  // The care summary endpoint (#53) takes the same `?beneficiaryRef=` query,
+  // so the repo-wide invariant must hold on it as well.
+  it('redacts the ref from care summary request logging', async () => {
+    const lines = await appWithCapturedLogs();
+    const res = await loggedApp!.inject({
+      method: 'GET',
+      url: `/receipts/summary?beneficiaryRef=${BENEFICIARY_REF}`,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).not.toHaveProperty('beneficiaryRef');
+
+    expectNoRef(lines);
+    expect(lines.some((l) => l.includes('incoming request'))).toBe(true);
+    expect(lines.some((l) => l.includes('beneficiaryRef=%5Bredacted%5D'))).toBe(true);
+  });
+
   it('keeps the ref out of error-path logging too', async () => {
     // A 400 (rejected by the route's query validation) still logs the URL on
     // `incoming request`, the rejection line itself, and `request completed`.

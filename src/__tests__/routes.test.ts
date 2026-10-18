@@ -349,10 +349,78 @@ describe('GET /health and /stats', () => {
       vouchers: 5,
       settledVouchers: 1,
       settledValue: '30000000',
+      // #52: the single settled voucher in `seed()` paid a 300000 fee.
+      feesCollected: '300000',
       receipts: 2,
       faucetDrips: 0,
       faucetWallets: 0,
     });
+  });
+
+  // #52: `settledFee` is stored per voucher but was never summed. The figure
+  // is the protocol's lifetime earnings, so it must be exact — these ids are
+  // chosen so a Number accumulation rounds them and fails the assertion.
+  it('sums settledFee into an exact feesCollected total, skipping settled vouchers without a fee', async () => {
+    const now = Date.now();
+    await prisma.voucher.createMany({
+      data: [
+        {
+          funder: FUNDER,
+          beneficiaryRef: REF,
+          providerAddress: CLINIC,
+          id: 'fee-1',
+          serviceCode: 101,
+          amount: '9007199254740993',
+          status: 'Settled',
+          createdAt: new Date(now - 4 * DAY),
+          expiresAt: new Date(now + DAY),
+          settledFee: '9007199254740993',
+        },
+        {
+          funder: FUNDER,
+          beneficiaryRef: REF,
+          providerAddress: CLINIC,
+          id: 'fee-2',
+          serviceCode: 101,
+          amount: '9007199254740995',
+          status: 'Settled',
+          createdAt: new Date(now - 3 * DAY),
+          expiresAt: new Date(now + DAY),
+          settledFee: '9007199254740995',
+        },
+        // Settled before the fee column existed: contributes nothing, but
+        // must not make the sum NaN or drop the other fees.
+        {
+          funder: FUNDER,
+          beneficiaryRef: REF,
+          providerAddress: CLINIC,
+          id: 'fee-3',
+          serviceCode: 101,
+          amount: '30000000',
+          status: 'Settled',
+          createdAt: new Date(now - 2 * DAY),
+          expiresAt: new Date(now + DAY),
+          settledFee: null,
+        },
+      ],
+    });
+
+    const { status, body } = await get('/stats');
+    expect(status).toBe(200);
+    // 300000 (seeded voucher 1) + the two above MAX_SAFE_INTEGER fees.
+    expect(body.feesCollected).toBe('18014398509781988');
+    expect(typeof body.feesCollected).toBe('string');
+  });
+
+  it('reports feesCollected as "0" when nothing has settled', async () => {
+    await prisma.voucher.updateMany({
+      where: { status: 'Settled' },
+      data: { status: 'Funded' },
+    });
+
+    const { body } = await get('/stats');
+    expect(body.settledVouchers).toBe(0);
+    expect(body.feesCollected).toBe('0');
   });
 
   it('counts faucet drips and the distinct wallets behind them', async () => {
@@ -1086,6 +1154,175 @@ describe('GET /receipts', () => {
     expect(orphan).toMatchObject({
       provider: { address: UNREGISTERED_CLINIC, name: null, country: null },
     });
+  });
+});
+
+// #53: one call that answers "how much care has this reference had, where
+// and when", so the care history page does not fetch and sum every receipt
+// on the client.
+describe('GET /receipts/summary', () => {
+  it('returns count, total, first and last visit matching the receipts', async () => {
+    // The expectations are derived from GET /receipts itself, the source of
+    // truth the issue names ("Summary values match the receipts"), not from
+    // re-running the aggregation in the test.
+    const { body: list } = await get(`/receipts?beneficiaryRef=${REF}`);
+    expect(list.receipts).toHaveLength(2);
+
+    const { status, body } = await get(`/receipts/summary?beneficiaryRef=${REF}`);
+    expect(status).toBe(200);
+    expect(body.count).toBe(list.total);
+    expect(body.total).toBe(list.totalSpend);
+    expect(body.totalDisplay).toBe(list.totalSpendDisplay);
+    // The list is sorted settledAt desc, so first/last are its ends.
+    expect(body.lastVisit).toBe(list.receipts[0].settledAt);
+    expect(body.firstVisit).toBe(list.receipts[list.receipts.length - 1].settledAt);
+  });
+
+  it('names the clinics visited', async () => {
+    const { body } = await get(`/receipts/summary?beneficiaryRef=${REF}`);
+    expect(body.clinics).toEqual([
+      {
+        address: CLINIC,
+        name: 'Ikeja General Clinic',
+        country: 'NG',
+        visits: 2,
+        spend: '40000000',
+        spendDisplay: '4.0000000',
+      },
+    ]);
+  });
+
+  it('sums totals with BigInt, exactly, past Number.MAX_SAFE_INTEGER', async () => {
+    await prisma.receipt.createMany({
+      data: [
+        {
+          voucherId: 'sum-big-1',
+          beneficiaryRef: REF,
+          providerAddress: CLINIC,
+          serviceCode: 101,
+          amount: '9007199254740993',
+          settledAt: new Date(Date.now() - 2 * DAY),
+        },
+        {
+          voucherId: 'sum-big-2',
+          beneficiaryRef: REF,
+          providerAddress: CLINIC,
+          serviceCode: 101,
+          // The odd pair rounds under Number accumulation.
+          amount: '9007199254740995',
+          settledAt: new Date(Date.now() - DAY),
+        },
+      ],
+    });
+
+    const { body } = await get(`/receipts/summary?beneficiaryRef=${REF}`);
+    // 30000000 + 10000000 (seeded) + the two above.
+    expect(body.total).toBe('18014398549481988');
+  });
+
+  it('aggregates across several clinics and reports unknown clinics as unknown', async () => {
+    const now = Date.now();
+    await prisma.receipt.createMany({
+      data: [
+        // A second clinic, and the earliest visit overall.
+        {
+          voucherId: 'sum-2nd',
+          beneficiaryRef: REF,
+          providerAddress: SECOND_CLINIC,
+          serviceCode: 404,
+          amount: '20000000',
+          settledAt: new Date(now - 90 * DAY),
+        },
+        // A clinic the indexer never saw registered (#51 precedent: unknown,
+        // not invented).
+        {
+          voucherId: 'sum-unknown',
+          beneficiaryRef: REF,
+          providerAddress: UNREGISTERED_CLINIC,
+          serviceCode: 101,
+          amount: '5000000',
+          settledAt: new Date(now - 4 * DAY),
+        },
+      ],
+    });
+
+    const { body } = await get(`/receipts/summary?beneficiaryRef=${REF}`);
+    expect(body.count).toBe(4);
+    expect(body.firstVisit).toBe(new Date(now - 90 * DAY).toISOString());
+    // The newest visit is a seeded receipt, whose timestamp comes from the
+    // seed's own clock — read it back from GET /receipts rather than
+    // recomputing it here.
+    const { body: list } = await get(`/receipts?beneficiaryRef=${REF}`);
+    expect(body.lastVisit).toBe(list.receipts[0].settledAt);
+    expect(body.clinics).toHaveLength(3);
+    // Deterministic order by address, so two calls render identically.
+    const addresses = body.clinics.map((c: { address: string }) => c.address);
+    expect(addresses).toEqual([...addresses].sort());
+    expect(body.clinics.find((c: { address: string }) => c.address === SECOND_CLINIC)).toEqual({
+      address: SECOND_CLINIC,
+      name: 'Mwanza Mission Hospital',
+      country: 'TZ',
+      visits: 1,
+      spend: '20000000',
+      spendDisplay: '2.0000000',
+    });
+    expect(
+      body.clinics.find((c: { address: string }) => c.address === UNREGISTERED_CLINIC),
+    ).toMatchObject({ name: null, country: null, visits: 1, spend: '5000000' });
+    // Per-clinic spend must add up to the grand total.
+    const spendSum = (body.clinics as { spend: string }[])
+      .reduce((acc: bigint, c) => acc + BigInt(c.spend), 0n)
+      .toString();
+    expect(spendSum).toBe(body.total);
+  });
+
+  it('summarises a reference with no care as zero, not as missing', async () => {
+    const { status, body } = await get(`/receipts/summary?beneficiaryRef=${OTHER_REF}`);
+    expect(status).toBe(200);
+    expect(body).toEqual({
+      count: 0,
+      total: '0',
+      totalDisplay: '0.0000000',
+      firstVisit: null,
+      lastVisit: null,
+      clinics: [],
+    });
+  });
+
+  it('requires a valid beneficiaryRef', async () => {
+    const missing = await get('/receipts/summary');
+    expect(missing.status).toBe(400);
+    expect(missing.body.error).toBe('invalid_query');
+
+    const malformed = await get('/receipts/summary?beneficiaryRef=not-a-ref');
+    expect(malformed.status).toBe(400);
+    expect(malformed.body.error).toBe('invalid_query');
+
+    // The clinic view is deliberately not part of this endpoint: a clinic
+    // querying by provider would summarise many patients into one number.
+    const byProvider = await get(`/receipts/summary?provider=${CLINIC}`);
+    expect(byProvider.status).toBe(400);
+  });
+
+  it('never echoes the beneficiary reference back', async () => {
+    const { status, body } = await get(`/receipts/summary?beneficiaryRef=${REF}`);
+    expect(status).toBe(200);
+    expect(body).not.toHaveProperty('beneficiaryRef');
+    expect(JSON.stringify(body)).not.toContain(REF);
+  });
+
+  it('is served under the /v1 alias with cache headers like the other read routes', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/receipts/summary?beneficiaryRef=${REF}`,
+      headers: { 'x-forwarded-for': nextTestClientIp() },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().count).toBe(2);
+    expect(res.headers['cache-control']).toBe(
+      'public, max-age=5, stale-while-revalidate=30',
+    );
+    expect(res.headers['etag']).toMatch(/^W\/"\d+-[A-Za-z0-9_-]+"$/);
   });
 });
 

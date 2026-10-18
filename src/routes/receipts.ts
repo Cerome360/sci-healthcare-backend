@@ -26,6 +26,10 @@ const voucherIdParam = z.object({
   voucherId: z.string().min(1),
 });
 
+const summaryQuery = z.object({
+  beneficiaryRef: z.string().refine(isValidRef, 'must be 64 hex characters'),
+});
+
 export async function receiptRoutes(app: FastifyInstance): Promise<void> {
   /**
    * A patient's care history.
@@ -146,6 +150,82 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       totalSpend,
       totalSpendDisplay: fromBaseUnits(totalSpend),
       receipts: page.map((r) => formatReceipt(r, labels, clinics)),
+    };
+  });
+
+  /**
+   * Care summary for one patient reference (#53).
+   *
+   * The care history page otherwise fetches every receipt and sums them on
+   * the client. This answers count, total spend, first and last visit and
+   * the clinics visited in one call, from the same rows `GET /receipts`
+   * serves.
+   *
+   * It is patient-view only: a provider-wide summary would aggregate many
+   * patients into one number, and a clinic already has its own list. The
+   * response never echoes the beneficiary reference back — the caller must
+   * already know it to ask — and clinic entries carry only public registry
+   * fields, matching `GET /receipts` (#51).
+   */
+  app.get('/receipts/summary', async (req) => {
+    const parsed = summaryQuery.safeParse(req.query);
+    if (!parsed.success) {
+      throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
+    }
+    const { beneficiaryRef } = parsed.data;
+
+    const rows = await prisma.receipt.findMany({
+      where: { beneficiaryRef },
+      select: { providerAddress: true, amount: true, settledAt: true },
+    });
+
+    // Amounts are i128 strings; the running sums stay in BigInt throughout,
+    // exactly as `totalSpend` on GET /receipts does.
+    let total = 0n;
+    let firstVisit: Date | null = null;
+    let lastVisit: Date | null = null;
+    const byClinic = new Map<string, { visits: number; spend: bigint }>();
+    for (const r of rows) {
+      const amount = BigInt(r.amount);
+      total += amount;
+      if (firstVisit === null || r.settledAt < firstVisit) firstVisit = r.settledAt;
+      if (lastVisit === null || r.settledAt > lastVisit) lastVisit = r.settledAt;
+      const clinic = byClinic.get(r.providerAddress) ?? { visits: 0, spend: 0n };
+      clinic.visits += 1;
+      clinic.spend += amount;
+      byClinic.set(r.providerAddress, clinic);
+    }
+
+    // One batched lookup names every visited clinic; an address the indexer
+    // never saw registered reports null rather than a guessed name.
+    const clinics = await providerSummaries(
+      [...byClinic.keys()].map((address) => ({ providerAddress: address })),
+    );
+    // Sorted by address so two calls render identically regardless of the
+    // order receipts happen to be read in.
+    const clinicList = [...byClinic.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([address, agg]) => {
+        const clinic = clinics.get(address);
+        const spend = agg.spend.toString();
+        return {
+          address,
+          name: clinic?.name ?? null,
+          country: clinic?.country ?? null,
+          visits: agg.visits,
+          spend,
+          spendDisplay: fromBaseUnits(spend),
+        };
+      });
+
+    const totalStr = total.toString();
+    return {
+      count: rows.length,
+      total: totalStr,
+      totalDisplay: fromBaseUnits(totalStr),
+      firstVisit,
+      lastVisit,
+      clinics: clinicList,
     };
   });
 

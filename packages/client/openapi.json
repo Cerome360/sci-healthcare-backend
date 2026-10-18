@@ -229,6 +229,15 @@
         }
       }
     },
+    "/v1/receipts/summary": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/v1/receipts/{voucherId}": {
       "get": {
         "parameters": [
@@ -488,6 +497,15 @@
       }
     },
     "/receipts": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/receipts/summary": {
       "get": {
         "responses": {
           "200": {

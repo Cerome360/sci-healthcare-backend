@@ -42,6 +42,7 @@ const CACHEABLE_ROUTES = new Set([
   '/vouchers/due',
   '/vouchers/:id',
   '/receipts',
+  '/receipts/summary',
   '/receipts/:voucherId',
   '/governance',
   '/stats',

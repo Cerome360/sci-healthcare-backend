@@ -159,7 +159,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
         prisma.voucher.count(),
         prisma.voucher.findMany({
           where: { status: 'Settled' },
-          select: { amount: true },
+          select: { amount: true, settledFee: true },
         }),
         prisma.receipt.count(),
         prisma.faucetDrip.count(),
@@ -172,12 +172,21 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       .reduce((acc, v) => acc + BigInt(v.amount), 0n)
       .toString();
 
+    // #52: what the protocol has earned, in the same exact i128 base-unit
+    // string as every other amount. Summed with BigInt because settled fees
+    // can exceed Number.MAX_SAFE_INTEGER; a settled voucher from before the
+    // fee column existed carries no fee and contributes nothing.
+    const feesCollected = settled
+      .reduce((acc, v) => acc + BigInt(v.settledFee ?? '0'), 0n)
+      .toString();
+
     return {
       providers,
       activeProviders,
       vouchers,
       settledVouchers: settled.length,
       settledValue,
+      feesCollected,
       receipts,
       // Both are 0 when no FAUCET_CONTRACT_ID is configured, because no
       // drip event ever reaches the indexer.
