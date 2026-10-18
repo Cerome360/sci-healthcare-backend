@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **Typed TypeScript client** (#75): added workspace package `@sci-healthcare/client` generated from the OpenAPI specification (`openapi.json`), providing strongly typed models and an API client for frontend and external consumers. Added `scripts/generate-client.ts`, `npm run client:generate`, and unit test suite in `src/__tests__/client.test.ts`.
 - **Telegram bot example for clinics** (#77): added `examples/telegram-bot/` implementing a microservice that verifies `X-SCI-Signature` HMAC-SHA256 signatures on webhook notifications and relays voucher updates to a clinic's Telegram chat without exposing beneficiary references. Tests in `src/__tests__/telegram-bot.test.ts`.
 - **API Privacy and Data Disclosure Documentation** (#76): added `docs/privacy.md` detailing the data exposed by every API endpoint, audience permissions, on-chain data origins, and patient privacy justifications.
 - **Endpoint curl examples** (#74): added complete, runnable curl examples with trimmed responses for every endpoint across system operations, providers, services, vouchers, receipts, governance, and real-time SSE streams in `README.md`.

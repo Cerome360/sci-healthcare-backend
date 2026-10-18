@@ -8,11 +8,16 @@
   "engines": {
     "node": ">=20.11"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:api": "tsx watch src/api.ts",
     "dev:indexer": "tsx watch src/worker.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && npm run client:generate",
+    "client:generate": "tsx scripts/generate-client.ts",
+    "client:build": "tsc -p packages/client/tsconfig.json",
     "start": "node dist/index.js",
     "start:api": "node dist/api.js",
     "start:indexer": "node dist/worker.js",
