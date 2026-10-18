@@ -1769,3 +1769,47 @@ describe('HTTP caching', () => {
     expect(res.statusCode).toBe(200);
   });
 });
+
+describe('query parameter length limits', () => {
+  it('rejects an over-long q parameter in /providers', async () => {
+    const longQ = 'a'.repeat(65);
+    const { status, body } = await get(`/providers?q=${longQ}`);
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_query');
+  });
+
+  it('rejects an over-long cursor parameter in /providers', async () => {
+    const longCursor = 'c'.repeat(257);
+    const { status, body } = await get(`/providers?cursor=${longCursor}`);
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_query');
+  });
+
+  it('rejects an over-long minAmount in /vouchers', async () => {
+    const longAmount = '1'.repeat(65);
+    const { status, body } = await get(`/vouchers?funder=${FUNDER}&minAmount=${longAmount}`);
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_query');
+  });
+
+  it('rejects an over-long status parameter in /vouchers', async () => {
+    const longStatus = 'Funded,' + 'a'.repeat(260);
+    const { status, body } = await get(`/vouchers?funder=${FUNDER}&status=${longStatus}`);
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_query');
+  });
+
+  it('rejects an over-long within parameter in /vouchers/due', async () => {
+    const longWithin = '1'.repeat(20) + 'h';
+    const { status, body } = await get(`/vouchers/due?funder=${FUNDER}&within=${longWithin}`);
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_query');
+  });
+
+  it('rejects an over-long beneficiaryRef in /receipts', async () => {
+    const longRef = 'a'.repeat(65);
+    const { status, body } = await get(`/receipts?beneficiaryRef=${longRef}`);
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_query');
+  });
+});

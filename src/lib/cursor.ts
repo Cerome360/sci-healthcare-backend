@@ -20,5 +20,5 @@ export function decodeCursor(cursor: string): CursorPayload | null {
   }
 }
 
-export const cursorParam = z.string().min(1).optional();
+export const cursorParam = z.string().min(1).max(256).optional();
 export const limitParam = z.coerce.number().int().min(1).max(100).default(50);

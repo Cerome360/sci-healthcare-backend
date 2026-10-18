@@ -29,18 +29,31 @@ const BASE_UNITS = /^\d+$/;
 
 const statusList = z
   .string()
+  .max(256)
   .transform((s) => s.split(',').map((x) => x.trim()))
   .pipe(z.array(z.enum(STATUSES)).min(1));
 
 const listQuery = z.object({
   funder: z.string().length(56).optional(),
   provider: z.string().length(56).optional(),
-  beneficiaryRef: z.string().refine(isValidRef, 'must be 64 hex characters').optional(),
+  beneficiaryRef: z
+    .string()
+    .max(64)
+    .refine(isValidRef, 'must be 64 hex characters')
+    .optional(),
   status: statusList.optional(),
-  createdFrom: z.string().datetime({ offset: true }).optional(),
-  createdTo: z.string().datetime({ offset: true }).optional(),
-  minAmount: z.string().regex(BASE_UNITS, 'must be base units as an integer string').optional(),
-  maxAmount: z.string().regex(BASE_UNITS, 'must be base units as an integer string').optional(),
+  createdFrom: z.string().max(64).datetime({ offset: true }).optional(),
+  createdTo: z.string().max(64).datetime({ offset: true }).optional(),
+  minAmount: z
+    .string()
+    .max(64)
+    .regex(BASE_UNITS, 'must be base units as an integer string')
+    .optional(),
+  maxAmount: z
+    .string()
+    .max(64)
+    .regex(BASE_UNITS, 'must be base units as an integer string')
+    .optional(),
   sort: z.enum(['createdAt', 'expiresAt', 'amount']).default('createdAt'),
   order: z.enum(['asc', 'desc']).default('desc'),
   cursor: cursorParam,
@@ -60,7 +73,11 @@ const listQuery = z.object({
 const csvQuery = z.object({
   funder: z.string().length(56).optional(),
   provider: z.string().length(56).optional(),
-  beneficiaryRef: z.string().refine(isValidRef, 'must be 64 hex characters').optional(),
+  beneficiaryRef: z
+    .string()
+    .max(64)
+    .refine(isValidRef, 'must be 64 hex characters')
+    .optional(),
   status: statusList.optional(),
 });
 
@@ -109,7 +126,10 @@ function idOrder(order: 'asc' | 'desc'): Prisma.VoucherOrderByWithRelationInput[
 const dueQuery = z.object({
   funder: z.string().length(56).optional(),
   provider: z.string().length(56).optional(),
-  within: z.string().regex(/^\d+[hmd]$/, 'within must be like 72h, 30d, or 45m'),
+  within: z
+    .string()
+    .max(16)
+    .regex(/^\d+[hmd]$/, 'within must be like 72h, 30d, or 45m'),
 });
 
 export async function voucherRoutes(app: FastifyInstance): Promise<void> {

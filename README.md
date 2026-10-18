@@ -498,6 +498,7 @@ this table and the schema drift apart.
 
 | Variable | Required | Default | Example | What it does |
 | --- | --- | --- | --- | --- |
+| `NODE_ENV` | No | `development` | `production` | Deployment environment; `production` rejects the wildcard `CORS_ORIGIN` `*` |
 | `PORT` | No | `8080` | `8080` | HTTP port the API listens on |
 | `HOST` | No | `0.0.0.0` | `0.0.0.0` | Address the API binds to |
 | `LOG_LEVEL` | No | `info` | `info` | pino log level: `fatal`, `error`, `warn`, `info`, `debug` or `trace` |

@@ -11,7 +11,11 @@ import { serviceKey, serviceLabels } from '../lib/services.js';
 
 const listQuery = z
   .object({
-    beneficiaryRef: z.string().refine(isValidRef, 'must be 64 hex characters').optional(),
+    beneficiaryRef: z
+      .string()
+      .max(64)
+      .refine(isValidRef, 'must be 64 hex characters')
+      .optional(),
     provider: z.string().length(56).optional(),
     cursor: cursorParam,
     limit: limitParam,
@@ -23,7 +27,7 @@ const listQuery = z
   });
 
 const voucherIdParam = z.object({
-  voucherId: z.string().min(1),
+  voucherId: z.string().min(1).max(128),
 });
 
 const summaryQuery = z.object({
