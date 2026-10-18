@@ -67,6 +67,19 @@ model Service {
 
 model Voucher {
   id              String    @id // on-chain u64 as string
+  /// Numeric mirror of `id`, and the only correct way to order vouchers by
+  /// id: `id` is a string, so `ORDER BY id` is lexicographic and puts
+  /// voucher 10 before voucher 9 (issue #61).
+  ///
+  /// Written from `id` by the `voucher_created` handler (see
+  /// `voucherSeq()` in `src/lib/voucher_seq.ts`) and backfilled for rows that
+  /// predate it by migration `20260106000000_voucher_seq`. Nullable because
+  /// a voucher id is a u64 in principle and locally-authored fixtures use
+  /// label ids (`bulk-0001`); those rows have no numeric id to mirror and
+  /// sort after every real one. `BigInt` rather than `Int` because the local
+  /// seed id space alone starts at 9e12, past the range of a 32-bit int.
+  /// Never exposed by an API response.
+  seq             BigInt?
   funder          String
   beneficiaryRef  String    // opaque 32-byte hex. Not reversible to an identity.
   serviceCode     Int

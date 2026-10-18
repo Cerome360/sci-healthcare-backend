@@ -2,6 +2,8 @@ import { createHash, createHmac } from 'node:crypto';
 
 import type { Prisma, PrismaClient } from '@prisma/client';
 
+import { voucherSeq } from '../lib/voucher_seq.js';
+
 /**
  * Deterministic local seed data (issue #59).
  *
@@ -153,6 +155,7 @@ const FEE_BPS = 250n;
 
 type SeedVoucher = {
   id: string;
+  seq: bigint | null;
   funder: string;
   beneficiaryRef: string;
   serviceCode: number;
@@ -213,6 +216,9 @@ function buildVoucher(index: number, providerAddress: string, funder: string): S
 
   return {
     id,
+    // Same numeric mirror of the id the indexer writes (#61), so seeded rows
+    // and indexed rows sort alike.
+    seq: voucherSeq(id),
     funder,
     beneficiaryRef: seedBeneficiaryRef(index % 40),
     serviceCode: catalog.code,

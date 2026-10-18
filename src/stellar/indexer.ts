@@ -8,6 +8,7 @@ import {
   getAllDeployments,
   INDEXED_CONTRACTS,
 } from '../env.js';
+import { voucherSeq } from '../lib/voucher_seq.js';
 import {
   hasStreamListeners,
   publishVoucherSignals,
@@ -922,6 +923,9 @@ export class Indexer {
       where: { id },
       create: {
         id,
+        // Numeric mirror of the id, so ordering by `seq` gives voucher 9
+        // before voucher 10 instead of the string order (#61).
+        seq: voucherSeq(id),
         funder: asAddress(d.funder),
         beneficiaryRef: asHex(d.beneficiary_ref),
         providerAddress,

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
 import { isValidRef } from '../lib/beneficiary.js';
+import { voucherSeq } from '../lib/voucher_seq.js';
 import { csvRow } from '../lib/csv.js';
 import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
 import { ApiError } from '../lib/errors.js';
@@ -91,6 +92,20 @@ const CSV_COLUMNS = [
 /** Rows fetched per database round trip; keeps export memory flat. */
 const CSV_BATCH_SIZE = 500;
 
+/**
+ * The id part of an order-by: `seq` (the numeric voucher id) first, then the
+ * string `id` as the final tie-break (#61).
+ *
+ * Sorting by `id` alone is lexicographic and puts voucher 10 before voucher 9.
+ * `seq` is that same value as a number. Rows with no seq — a locally-authored
+ * fixture id like `bulk-0001`, which has nothing numeric to mirror — sort last
+ * in both directions, so the total order stays deterministic and no row can
+ * fall between two pages.
+ */
+function idOrder(order: 'asc' | 'desc'): Prisma.VoucherOrderByWithRelationInput[] {
+  return [{ seq: { sort: order, nulls: 'last' } }, { id: order }];
+}
+
 const dueQuery = z.object({
   funder: z.string().length(56).optional(),
   provider: z.string().length(56).optional(),
@@ -162,19 +177,48 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
         if (!decoded) {
           throw new ApiError(400, 'invalid_cursor', 'Invalid cursor');
         }
-        const cursorWhere: Prisma.VoucherWhereInput = {
-          ...where,
-          OR: [
-            { createdAt: { lt: new Date(decoded.createdAt) } },
-            { createdAt: new Date(decoded.createdAt), id: { lt: decoded.id } },
-          ],
-        };
+        /**
+         * The walk below is ordered by `(createdAt, seq, id)`, where `seq` is
+         * the numeric voucher id — ordering by the `id` string would put
+         * voucher 10 before voucher 9 (#61). A keyset predicate has to compare
+         * the columns it orders by, so the cursor row's own `seq` is read
+         * here: one lookup by primary key, exact even for a row whose `seq` is
+         * null because its id was hand-written (`bulk-0001`) rather than
+         * indexed off the chain.
+         */
+        const cursorRow = await prisma.voucher.findUnique({
+          where: { id: decoded.id },
+          select: { seq: true },
+        });
+        // A cursor can outlive its row (a rebuilt read model, a pruned
+        // fixture): then the id's own numeric value is all there is to go on.
+        const cursorSeq = cursorRow ? cursorRow.seq : voucherSeq(decoded.id);
+        const at = new Date(decoded.createdAt);
+        const afterCursor: Prisma.VoucherWhereInput[] =
+          cursorSeq === null
+            ? [
+                { createdAt: { lt: at } },
+                // The cursor row is in the unnumbered tail, which is ordered
+                // by id, so the boundary is an id comparison.
+                { createdAt: at, seq: null, id: { lt: decoded.id } },
+              ]
+            : [
+                { createdAt: { lt: at } },
+                { createdAt: at, seq: { lt: cursorSeq } },
+                // Same numeric id, different string id — only reachable for
+                // ids that differ in form alone (`9` and `09`). Listed so the
+                // predicate matches the `id` tie-break of the order exactly.
+                { createdAt: at, seq: cursorSeq, id: { lt: decoded.id } },
+                // Rows with no seq sort after every numbered one.
+                { createdAt: at, seq: null },
+              ];
+        const cursorWhere: Prisma.VoucherWhereInput = { ...where, OR: afterCursor };
         const rows =
           min === null && max === null
             ? await prisma.voucher.findMany({
                 where: cursorWhere,
                 include: { provider: true },
-                orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+                orderBy: [{ createdAt: 'desc' }, ...idOrder('desc')],
                 take: limit + 1,
               })
             : (
@@ -318,7 +362,9 @@ async function* voucherCsv(where: Prisma.VoucherWhereInput): AsyncGenerator<stri
     const batch = await prisma.voucher.findMany({
       where,
       include: { provider: true },
-      orderBy: { id: 'asc' },
+      // Numeric id order (#61), with the string id as the final tie-break so
+      // the batch boundary below always lands on a deterministic total order.
+      orderBy: idOrder('asc'),
       take: CSV_BATCH_SIZE,
       ...(cursor === undefined ? {} : { cursor: { id: cursor }, skip: 1 }),
     });
@@ -369,7 +415,9 @@ async function pageByWhere(
     prisma.voucher.findMany({
       where,
       include: { provider: true },
-      orderBy: [primary, { id: order }],
+      // Sorted by `seq`, the numeric voucher id, not `id`: string order
+      // would put voucher 10 before voucher 9 (#61).
+      orderBy: [primary, ...idOrder(order)],
       take: limit,
       skip: offset,
     }),
@@ -397,7 +445,10 @@ async function pageByAmount(
     orderBy:
       sort === 'amount'
         ? { createdAt: 'desc' }
-        : [sort === 'createdAt' ? { createdAt: order } : { expiresAt: order }, { id: order }],
+        : [
+            sort === 'createdAt' ? { createdAt: order } : { expiresAt: order },
+            ...idOrder(order),
+          ],
     select: { id: true, amount: true },
   });
 

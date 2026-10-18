@@ -65,6 +65,7 @@
 - **README environment reference**: the Environment table now documents every variable `src/env.ts` accepts, with Required, Default, Example and description columns; `STELLAR_NETWORK` was missing. `src/__tests__/env-docs.test.ts` fails when the table and the schema drift apart.
 
 ### Fixed
+- **Voucher id ordering** (#61): `Voucher.id` is the on-chain u64 kept as a string, so every `ORDER BY id` was lexicographic and put voucher 10 before voucher 9. `Voucher` now carries a numeric `seq` mirror of the id, written from the id by the `voucher_created` handler (`voucherSeq()` in `src/lib/voucher_seq.ts`) and backfilled for existing rows by migration `20260106000000_voucher_seq`; `GET /vouchers` (both the sorted page and the keyset cursor), `GET /vouchers.csv` and the amount-filtered page all sort by `seq`, with `id` kept as the final tie-break. `seq` is `BIGINT` rather than `Int` because the seeded id space starts at 9e12, and it is null for a hand-written id that has no numeric value (`bulk-0001`), which then sorts last in both directions so no row can fall between two pages. No response gained a field. Tests in `src/__tests__/voucher_seq.test.ts`.
 - **tests:** vitest now collects only `src/**/*.test.ts`. The `node:test` suite at `.github/scripts/automerge.test.cjs` has its own CI job, but was also being collected by vitest and failed `npm test` as "no test suite found".
 
 ## 0.2.0 — 2026-10-09
