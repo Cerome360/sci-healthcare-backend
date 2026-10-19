@@ -106,8 +106,10 @@ stays in the log, never in the response.
 | `GET /ready` | Readiness; 503 once the indexer trails by more than `READY_MAX_LAG_LEDGERS` |
 | `GET /version` | Build version and commit, network, RPC endpoints, contract ids, indexer start ledger and process start time |
 | `GET /stats` | Protocol counters for the dashboard |
-| `GET /providers` | Verified clinics, filterable by `status`, `country`, `q` (case-insensitive name search) |
+| `GET /stats/daily?days=30` | Funded / settled / refunded counts and value per UTC day (`days` 1–365, max 365) |
+| `GET /providers` | Verified clinics, filterable by `status`, `country`, `q` |
 | `GET /providers/:address` | One clinic and its service catalogue |
+| `GET /providers/:address/stats` | A clinic's vouchers by status and its total settled value |
 | `GET /providers/:address/history` | Every status transition for a clinic, oldest first |
 | `GET /providers/:address/services/:code/history` | Every observed price for a service, oldest first |
 | `GET /countries` | Countries with at least one active clinic and their clinic counts |
@@ -477,6 +479,61 @@ See [`packages/client/README.md`](packages/client/README.md) for installation an
 
 Amounts are `i128` on chain and are returned as **decimal strings**. Parsing one into a JavaScript number loses precision above 2^53 — use `BigInt`.
 
+`GET /stats/daily` returns one row per UTC day, oldest first, and includes days
+with no activity as zeros so a chart never has to fill gaps. Each row is
+`{ date, funded, settled, refunded }`, where each bucket is `{ count, amount }`
+and `amount` is exact base units. Funded is bucketed by voucher `createdAt`,
+settled by receipt `settledAt`, and refunded by a voucher's `refundedAt`.
+
+## Webhooks
+
+Set `WEBHOOK_URLS` to a comma-separated list of endpoints and `WEBHOOK_SECRET`
+to sign every delivery. When a voucher-related event is projected, the backend
+writes a row to a delivery outbox in the same transaction, then posts it from a
+separate loop — a slow or unreachable endpoint therefore never stalls the
+indexer. Failed deliveries retry with exponential backoff (five seconds
+doubling, capped at ten minutes) and are given up on after six attempts or a
+permanent 4xx response.
+
+Each request is `POST` with a JSON body and an `X-SCI-Signature` header holding
+the hex HMAC-SHA256 of the **raw request body** under `WEBHOOK_SECRET`:
+
+```json
+{
+  "event": "voucher_settled",
+  "voucherId": "42",
+  "status": "Settled",
+  "txHash": "deadbeef...",
+  "ledger": 123456
+}
+```
+
+`txHash` is omitted when the RPC did not report one. The payload never contains
+a beneficiary reference, so a webhook receiver learns that *a* voucher moved,
+never who it was for.
+
+Verify a delivery by recomputing the signature over the exact bytes received —
+do not parse and re-serialise the JSON first, as that can change the bytes:
+
+```ts
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+app.post('/webhooks/sci', (req, res) => {
+  const received = req.header('x-sci-signature') ?? '';
+  const expected = createHmac('sha256', process.env.WEBHOOK_SECRET!)
+    .update(req.rawBody) // the raw body buffer, not a re-encoded object
+    .digest('hex');
+
+  const ok =
+    received.length === expected.length &&
+    timingSafeEqual(Buffer.from(received), Buffer.from(expected));
+  if (!ok) return res.sendStatus(401);
+
+  // Only now trust the body.
+  res.sendStatus(204);
+});
+```
+
 ## Quick start
 
 ```bash
@@ -488,6 +545,26 @@ npx prisma generate
 npx prisma db push
 npm run dev
 ```
+
+### Quick start with Docker
+
+`docker compose up` builds the API, starts Postgres, applies the schema and
+serves a working indexing API on `http://localhost:8080`. It ships the current
+testnet contract ids, so nothing has to be filled in first.
+
+```bash
+docker compose up
+curl http://localhost:8080/health   # {"status":"ok"}
+curl http://localhost:8080/ready    # 200 once the indexer catches up
+```
+
+`INDEXER_START_LEDGER` is `0` in compose, which starts at the current ledger tip
+so `/ready` goes green in seconds. Set it to the deployment ledger to backfill
+history instead — but note Soroban RPC only retains a rolling window of ledgers.
+
+The image runs as the unprivileged `node` user. Override any environment value
+(for example `CORS_ORIGIN` or the contract ids) by exporting it or adding a
+`.env` file beside `docker-compose.yml`.
 
 ## Environment
 
@@ -522,6 +599,8 @@ this table and the schema drift apart.
 | `SHUTDOWN_TIMEOUT_MS` | No | `15000` | `15000` | How long SIGTERM/SIGINT waits for the indexer cycle in flight before the process hard-exits |
 | `SSE_HEARTBEAT_MS` | No | `15000` | `15000` | Idle interval between `: heartbeat` comments on `GET /stream` |
 | `SSE_MAX_CONNECTIONS` | No | `64` | `64` | Concurrent `GET /stream` connections one process will hold; past that the route answers `503 stream_full` |
+| `WEBHOOK_URLS` | No |  | `https://clinic.example/hooks` | Comma-separated endpoints sent a signed notification for each voucher event; blank (the default) disables webhooks |
+| `WEBHOOK_SECRET` | No |  | `a-long-random-string` | HMAC-SHA256 key for the `X-SCI-Signature` header; blank by default, required (min 16 characters) when `WEBHOOK_URLS` is set |
 
 Set `INDEXER_START_LEDGER` to the deployment ledger. Leaving it at `0` starts at the current tip and silently skips all prior history. Soroban RPC also only retains a rolling window of ledgers (about 7 days on testnet) — an indexer that falls further behind than the window cannot catch up, and `/ready` will say so rather than pretend otherwise.
 

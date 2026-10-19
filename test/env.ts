@@ -15,4 +15,8 @@ Object.assign(process.env, {
   REGISTRY_CONTRACT_ID: contractId('REGISTRY'),
   VOUCHER_CONTRACT_ID: contractId('VOUCHER'),
   RECEIPT_CONTRACT_ID: contractId('RECEIPT'),
+  // Webhooks are enabled so the outbox and signature paths are exercised.
+  // The URL is never dialled: tests inject their own fetch.
+  WEBHOOK_URLS: 'https://clinic.example.test/webhooks',
+  WEBHOOK_SECRET: 'test-webhook-secret-0123456789',
 });

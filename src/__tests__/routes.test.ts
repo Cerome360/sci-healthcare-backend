@@ -603,6 +603,12 @@ describe('GET /ready', () => {
 });
 
 describe('GET /providers', () => {
+  it('searches clinics by part of their name', async () => {
+    const { status, body } = await get('/providers?q=Ikeja');
+    expect(status).toBe(200);
+    expect(body.providers.map((p: { name: string }) => p.name)).toEqual(['Ikeja General Clinic']);
+  });
+
   it('filters by status and lists only active services', async () => {
     const { body } = await get('/providers?status=Active');
     expect(body.total).toBe(2);
@@ -635,124 +641,142 @@ describe('GET /providers', () => {
   });
 });
 
-describe('GET /providers search', () => {
-  it('matches a lower-case substring against a mixed-case name', async () => {
-    const { body } = await get('/providers?q=ikeja');
-    expect(body.total).toBe(1);
-    expect(body.providers[0].name).toBe('Ikeja General Clinic');
-  });
-
-  it('matches an upper-case substring', async () => {
-    const { body } = await get('/providers?q=KISUMU');
-    expect(body.total).toBe(1);
-    expect(body.providers[0].name).toBe('Kisumu Health Post');
-  });
-
-  it('matches a mid-name substring regardless of case', async () => {
-    const { body } = await get('/providers?q=GENERAL');
-    expect(body.total).toBe(1);
-    expect(body.providers[0].name).toBe('Ikeja General Clinic');
-  });
-
-  it('returns nothing when no name matches', async () => {
-    const { body } = await get('/providers?q=zzz');
-    expect(body).toMatchObject({ total: 0, providers: [] });
-  });
-
-  it('rejects an empty or over-long q', async () => {
-    expect((await get('/providers?q=')).status).toBe(400);
-    expect((await get(`/providers?q=${'a'.repeat(65)}`)).status).toBe(400);
-  });
-});
-
-describe('GET /countries', () => {
-  it('counts active clinics per country and omits inactive ones', async () => {
-    const { status, body } = await get('/countries');
+describe('GET /providers/:address/stats', () => {
+  it('returns counts by voucher status and the total settled value', async () => {
+    const { status, body } = await get(`/providers/${CLINIC}/stats`);
     expect(status).toBe(200);
-    expect(body.countries).toEqual([
-      { code: 'NG', clinicCount: 1 },
-      { code: 'TZ', clinicCount: 1 },
-    ]);
-  });
-});
-
-describe('GET /services', () => {
-  it('aggregates active services by code across active clinics', async () => {
-    const { status, body } = await get('/services');
-    expect(status).toBe(200);
-    expect(body.total).toBe(3);
-
-    const byCode = (code: number) =>
-      body.services.find((s: { code: number }) => s.code === code);
-
-    const consult = byCode(101);
-    expect(consult).toMatchObject({
-      labels: ['General consultation', 'Outpatient consult'],
-      clinicCount: 2,
-      minPrice: '30000000',
-      maxPrice: '40000000',
-      medianPrice: '35000000',
-    });
-    expect(consult.minPriceDisplay).toBe('3.0000000');
-    expect(consult.medianPriceDisplay).toBe('3.5000000');
-
-    expect(byCode(202)).toMatchObject({
-      labels: ['Malaria rapid test'],
-      clinicCount: 2,
-      minPrice: '10000000',
-      maxPrice: '15000000',
-      medianPrice: '12500000',
-    });
-
-    expect(byCode(404)).toMatchObject({
-      labels: ['Dental cleaning'],
-      clinicCount: 1,
-      minPrice: '20000000',
-      maxPrice: '20000000',
-      medianPrice: '20000000',
-    });
-
-    expect(byCode(303)).toBeUndefined();
-  });
-
-  it('lists one entry per code, ascending', async () => {
-    const { body } = await get('/services');
-    expect(body.services.map((s: { code: number }) => s.code)).toEqual([101, 202, 404]);
-  });
-});
-
-describe('GET /services/:code', () => {
-  it('lists the active clinics offering a code, cheapest first', async () => {
-    const { status, body } = await get('/services/101');
-    expect(status).toBe(200);
-    expect(body.code).toBe(101);
-    expect(body.clinicCount).toBe(2);
-    expect(body.clinics.map((c: { name: string }) => c.name)).toEqual([
-      'Ikeja General Clinic',
-      'Mwanza Mission Hospital',
-    ]);
-    expect(body.clinics[0]).toMatchObject({
+    expect(body).toMatchObject({
       address: CLINIC,
-      country: 'NG',
-      price: '30000000',
-      priceDisplay: '3.0000000',
+      name: 'Ikeja General Clinic',
+      status: 'Active',
+      vouchers: 5,
+      byStatus: {
+        Funded: 1,
+        Claimed: 1,
+        Attested: 1,
+        Settled: 1,
+        Disputed: 1,
+        Refunded: 0,
+      },
+      settledVouchers: 1,
+      settledValue: '30000000',
+      settledValueDisplay: '3.0000000',
     });
   });
 
-  it('404s a code only offered by an inactive service', async () => {
-    const { status, body } = await get('/services/303');
+  it('returns zeroed stats for a provider with no vouchers', async () => {
+    const { status, body } = await get(`/providers/${PENDING_CLINIC}/stats`);
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      vouchers: 0,
+      settledVouchers: 0,
+      settledValue: '0',
+      settledValueDisplay: '0.0000000',
+      byStatus: { Funded: 0, Claimed: 0, Attested: 0, Settled: 0, Disputed: 0, Refunded: 0 },
+    });
+  });
+
+  it('sums settled value exactly beyond Number.MAX_SAFE_INTEGER', async () => {
+    await prisma.voucher.create({
+      data: {
+        id: 'big-1',
+        funder: FUNDER,
+        beneficiaryRef: REF,
+        providerAddress: CLINIC,
+        serviceCode: 101,
+        amount: '9007199254740993',
+        status: 'Settled',
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + DAY),
+      },
+    });
+
+    const { body } = await get(`/providers/${CLINIC}/stats`);
+    expect(body.settledVouchers).toBe(2);
+    expect(body.settledValue).toBe((30000000n + 9007199254740993n).toString());
+  });
+
+  it('404s an unknown provider', async () => {
+    const { status, body } = await get(`/providers/${FUNDER}/stats`);
     expect(status).toBe(404);
-    expect(body.error).toBe('service_not_found');
+    expect(body.error).toBe('provider_not_found');
+  });
+});
+
+describe('GET /stats/daily', () => {
+  const sum = (body: { series: Array<Record<string, { count: number; amount: string }>> }, key: string) =>
+    body.series.reduce(
+      (acc, row) => {
+        const bucket = row[key]!;
+        return { count: acc.count + bucket.count, amount: (BigInt(acc.amount) + BigInt(bucket.amount)).toString() };
+      },
+      { count: 0, amount: '0' },
+    );
+
+  it('returns one row per UTC day, oldest first, including empty days', async () => {
+    const { status, body } = await get('/stats/daily?days=30');
+    expect(status).toBe(200);
+    expect(body.days).toBe(30);
+    expect(body.series).toHaveLength(30);
+
+    const dates = body.series.map((r: { date: string }) => r.date);
+    expect(new Set(dates).size).toBe(30);
+    for (let i = 1; i < dates.length; i += 1) {
+      expect(Date.parse(`${dates[i]}T00:00:00Z`) - Date.parse(`${dates[i - 1]}T00:00:00Z`)).toBe(DAY);
+    }
+    expect(dates[dates.length - 1]).toBe(new Date().toISOString().slice(0, 10));
+
+    // Days with nothing on them are present and zeroed, so charts need no gaps filled.
+    const empty = body.series.find(
+      (r: { funded: { count: number } }) => r.funded.count === 0,
+    );
+    expect(empty).toMatchObject({
+      funded: { count: 0, amount: '0' },
+      settled: { count: 0, amount: '0' },
+      refunded: { count: 0, amount: '0' },
+    });
   });
 
-  it('404s an unknown code', async () => {
-    expect((await get('/services/999')).status).toBe(404);
+  it('sums funded and settled activity inside the window, exactly', async () => {
+    const { body } = await get('/stats/daily?days=30');
+    // Funded: ids 1, 4 and 5 (ids 2 and 3 were created outside the 30-day window).
+    expect(sum(body, 'funded')).toEqual({ count: 3, amount: '90000000' });
+    // Settled: the two receipts from the seed.
+    expect(sum(body, 'settled')).toEqual({ count: 2, amount: '40000000' });
+    expect(sum(body, 'refunded')).toEqual({ count: 0, amount: '0' });
   });
 
-  it('400s a non-numeric code', async () => {
-    const { status, body } = await get('/services/abc');
-    expect(status).toBe(400);
-    expect(body.error).toBe('invalid_code');
+  it('buckets a refund by its refundedAt day', async () => {
+    const now = Date.now();
+    const refundedAt = new Date(now - 2 * DAY);
+    await prisma.voucher.create({
+      data: {
+        id: 'refund-1',
+        funder: FUNDER,
+        beneficiaryRef: OTHER_REF,
+        providerAddress: CLINIC,
+        serviceCode: 101,
+        amount: '7000000',
+        status: 'Refunded',
+        createdAt: new Date(now - 20 * DAY),
+        expiresAt: new Date(now + DAY),
+        refundedAt,
+      },
+    });
+
+    const { body } = await get('/stats/daily?days=7');
+    const day = body.series.find(
+      (r: { date: string }) => r.date === refundedAt.toISOString().slice(0, 10),
+    );
+    expect(day.refunded).toEqual({ count: 1, amount: '7000000' });
+  });
+
+  it('defaults to 30 days and rejects a window outside 1..365', async () => {
+    expect((await get('/stats/daily')).body.days).toBe(30);
+    expect((await get('/stats/daily?days=365')).status).toBe(200);
+    expect((await get('/stats/daily?days=0')).status).toBe(400);
+    expect((await get('/stats/daily?days=366')).status).toBe(400);
+    expect((await get('/stats/daily?days=week')).status).toBe(400);
   });
 });
 

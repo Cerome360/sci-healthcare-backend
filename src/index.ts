@@ -1,6 +1,7 @@
 import { buildApp } from './app.js';
 import { disconnect } from './db.js';
 import { env } from './env.js';
+import { WebhookDispatcher } from './lib/webhooks.js';
 import { Indexer } from './stellar/indexer.js';
 import { startTracingIfConfigured } from './tracing.js';
 
@@ -20,6 +21,11 @@ async function main(): Promise<void> {
 
   const indexer = new Indexer(app.log);
   await indexer.start();
+
+  // Webhook delivery runs on its own loop so a slow endpoint can never
+  // hold up the cursor.
+  const webhooks = new WebhookDispatcher(app.log);
+  webhooks.start();
 
   let shuttingDown = false;
 
@@ -53,6 +59,7 @@ async function main(): Promise<void> {
     hardExit.unref();
 
     try {
+      await webhooks.stop();
       await indexer.stop();
       await app.close();
       await disconnect();

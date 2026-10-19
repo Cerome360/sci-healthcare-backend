@@ -95,6 +95,10 @@ model Voucher {
   disputeReason   Int?
   settledNet      String?
   settledFee      String?
+  /// When the voucher was refunded, from the voucher_refunded event's
+  /// ledger close time. Null until a refund is observed. This is what makes
+  /// the daily activity series able to bucket refunds by day.
+  refundedAt      DateTime?
   updatedAt       DateTime  @updatedAt
 
   provider        Provider @relation(fields: [providerAddress], references: [address])
@@ -127,6 +131,8 @@ model Voucher {
   // `status: 'Settled'` scan behind GET /stats, each sorted by createdAt.
   @@index([status, createdAt])
   @@index([expiresAt])
+  @@index([createdAt])
+  @@index([refundedAt])
 }
 
 model Receipt {
@@ -277,4 +283,37 @@ model ReconcileMismatch {
   lastSeen  DateTime
 
   @@index([kind])
+}
+
+/// Webhook delivery outbox.
+///
+/// A row is written in the same transaction as the projection it describes,
+/// so an event that fails to project is never announced. Delivery happens in
+/// a separate loop, which keeps a slow or dead endpoint from stalling the
+/// indexer. One row per configured endpoint, so each endpoint retries and
+/// backs off independently.
+///
+/// The exact JSON body is stored rather than rebuilt on retry: the signature
+/// covers those bytes, and a retry has to send the same request in order to
+/// be verifiable. The payload deliberately contains no beneficiary reference.
+model WebhookDelivery {
+  id            String    @id
+  url           String
+  event         String
+  voucherId     String
+  status        String
+  txHash        String?
+  ledger        Int
+  payload       String
+  attempts      Int       @default(0)
+  /// When a retry becomes due.
+  nextAttemptAt DateTime
+  deliveredAt   DateTime?
+  /// Set when delivery is given up on: too many attempts, or a permanent
+  /// response such as a 404. Never retried again once set.
+  abandonedAt   DateTime?
+  lastError     String?
+  createdAt     DateTime  @default(now())
+
+  @@index([deliveredAt, abandonedAt, nextAttemptAt])
 }

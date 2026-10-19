@@ -66,6 +66,13 @@ export const schema = z.object({
    */
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
 
+  // Comma-separated endpoints notified of voucher events. Blank disables
+  // webhooks entirely, which is the default.
+  WEBHOOK_URLS: z.string().default(''),
+  // HMAC key used to sign every delivery. Required once an endpoint is set,
+  // so a deployment cannot accidentally send unsigned events.
+  WEBHOOK_SECRET: z.string().default(''),
+
   /**
    * Idle interval between heartbeat frames on `GET /stream`. A comment line
    * every so often is what stops a proxy or mobile carrier from closing a
@@ -150,8 +157,21 @@ export function redactRpcUrl(url: string): string {
   return url.replace(/:\/\/[^/]+@/, '://***@');
 }
 
+/** Minimum length of WEBHOOK_SECRET; shorter keys are refused at boot. */
+export const MIN_WEBHOOK_SECRET_LENGTH = 16;
+
+const validated = schema.superRefine((value, ctx) => {
+  if (value.WEBHOOK_URLS.trim() && value.WEBHOOK_SECRET.length < MIN_WEBHOOK_SECRET_LENGTH) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['WEBHOOK_SECRET'],
+      message: `must be at least ${MIN_WEBHOOK_SECRET_LENGTH} characters when WEBHOOK_URLS is set`,
+    });
+  }
+});
+
 function load(): Env {
-  const parsed = schema.safeParse(process.env);
+  const parsed = validated.safeParse(process.env);
   if (!parsed.success) {
     const issues = parsed.error.issues
       .map((i) => `  ${i.path.join('.')}: ${i.message}`)
@@ -257,6 +277,7 @@ getAllDeployments().forEach((d, i) => {
   CONTRACT_TO_DEPLOYMENT_INDEX.set(d.contractId, i);
 });
 
+
 /**
  * Returns the deployment index for a given contract ID, or undefined if not found.
  */
@@ -293,6 +314,17 @@ export const CONTRACTS = [
   { contract: 'voucher', contractId: env.VOUCHER_CONTRACT_ID },
   { contract: 'receipt', contractId: env.RECEIPT_CONTRACT_ID },
 ] as const;
+
+/**
+ * Endpoints that receive signed voucher events, parsed from the comma
+ * separated `WEBHOOK_URLS`. Empty means webhooks are off.
+ */
+export const WEBHOOK_URLS = env.WEBHOOK_URLS.split(',')
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0);
+
+/** True when at least one endpoint is configured. */
+export const WEBHOOKS_ENABLED = WEBHOOK_URLS.length > 0;
 
 /**
  * Map from contract ID to its type (registry/voucher/receipt).

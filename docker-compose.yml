@@ -1,0 +1,85 @@
+# Local stack: Postgres, the backend, and a one-shot schema push.
+#
+#   docker compose up
+#
+# `migrate` applies the Postgres schema and exits; `api` waits for it, then
+# serves the read-only API and indexes testnet. Contract ids are the current
+# testnet deployment (same values as render.yaml and the README). Override any
+# of them by exporting the variable or adding a `.env` file next to this one.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sci
+      POSTGRES_PASSWORD: sci
+      POSTGRES_DB: sci_healthcare
+    ports:
+      - "5432:5432"
+    volumes:
+      - sci-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sci -d sci_healthcare"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Built from the `build` stage, which keeps the Prisma CLI. Runs once, applies
+  # the schema, and exits; `api` only starts once it has succeeded.
+  migrate:
+    build:
+      context: .
+      target: build
+    command: npx prisma db push --skip-generate --accept-data-loss
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://sci:sci@db:5432/sci_healthcare?schema=public
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      target: runtime
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgresql://sci:sci@db:5432/sci_healthcare?schema=public
+      PORT: "8080"
+      HOST: 0.0.0.0
+      LOG_LEVEL: info
+      CORS_ORIGIN: http://localhost:3000
+      READY_MAX_LAG_LEDGERS: "120"
+      STELLAR_NETWORK: testnet
+      SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
+      NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+      REGISTRY_CONTRACT_ID: CAMU635NRFEHATJ6MTY5SI43IAZ43KHPFXAQDQAST2AHKCHLSGWHVE4V
+      VOUCHER_CONTRACT_ID: CBPUQN6CNJCNGPKNEXB7UM4T7RINKQB7HQI5CXEOSQ5EFRHE4G4VKPSQ
+      RECEIPT_CONTRACT_ID: CBCJRI2BCZBMZNX77WWDC2NGSV4ZNAN5Q23XHYNBH6UTOQMPJHZGX5C7
+      USDC_CONTRACT_ID: CCRLJ7FEIKTR3GBT3VQQPSIJGRBO2WPNMVFKJDP6AYGJQWECOR4QVE5M
+      # 0 starts at the current ledger tip, which is what a local stack wants:
+      # /ready goes green in seconds. Set the deploy ledger to backfill history,
+      # but note Soroban RPC only retains a rolling window of ledgers.
+      INDEXER_START_LEDGER: "0"
+      INDEXER_POLL_MS: "5000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/ready').then(r => process.exit(r.status === 200 ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+volumes:
+  sci-db:

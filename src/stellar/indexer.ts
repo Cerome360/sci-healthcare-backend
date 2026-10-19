@@ -9,6 +9,7 @@ import {
   INDEXED_CONTRACTS,
 } from '../env.js';
 import { voucherSeq } from '../lib/voucher_seq.js';
+import { enqueueWebhook } from '../lib/webhooks.js';
 import {
   hasStreamListeners,
   publishVoucherSignals,
@@ -722,7 +723,9 @@ export class Indexer {
         );
       case 'voucher_refunded':
         // The topic carries the funder.
-        return this.voucherStatus(db, e, 'Refunded', {}, null);
+        // The contract emits no timestamp on a refund, so the ledger close
+        // time is the timestamp: it is when the refund became true.
+        return this.voucherStatus(db, e, 'Refunded', { refundedAt: e.ledgerClosedAt }, null);
       case 'receipt_minted':
         await this.onReceiptMinted(db, e);
         // Not published: the settlement it follows is already on the stream,
@@ -791,6 +794,15 @@ export class Indexer {
     providerAddress: string | null,
   ): Promise<PendingSignal> {
     await this.onVoucherStatus(db, e.fields, status, extra);
+    // Queued in the same transaction, so nothing is announced that did not
+    // land in the read model. Delivery happens on its own loop.
+    await enqueueWebhook(db, {
+      event: e.name,
+      voucherId: asId(e.fields.voucher_id),
+      status,
+      txHash: e.txHash,
+      ledger: e.ledger,
+    });
     return this.voucherSignal(e, status, providerAddress);
   }
 
@@ -960,6 +972,14 @@ export class Indexer {
         deploymentId,
       },
       update: {},
+    });
+
+    await enqueueWebhook(db, {
+      event: e.name,
+      voucherId: id,
+      status: 'Funded',
+      txHash: e.txHash,
+      ledger: e.ledger,
     });
   }
 

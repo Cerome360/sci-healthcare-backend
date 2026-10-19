@@ -17,6 +17,17 @@ const listQuery = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
+/** Every voucher status, in the order the contract moves through them. */
+const VOUCHER_STATUSES = [
+  'Funded',
+  'Claimed',
+  'Attested',
+  'Settled',
+  'Disputed',
+  'Refunded',
+] as const;
+
+/** Case-insensitive on Postgres; SQLite's LIKE is already case-insensitive for ASCII. */
 function nameContains(q: string): { contains: string; mode?: string } {
   const filter: { contains: string; mode?: string } = { contains: q };
   if (isPostgres) filter.mode = 'insensitive';
@@ -126,6 +137,61 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
         priceDisplay: fromBaseUnits(s.price),
         active: s.active,
       })),
+    };
+  });
+
+  /**
+   * A clinic's own throughput: how many vouchers it received, in what state,
+   * and the total value it settled.
+   *
+   * A funder choosing between clinics wants evidence one actually delivers
+   * care, and a clinic desk wants its own numbers. Amounts are summed with
+   * BigInt and returned as base-unit decimal strings, like everywhere else.
+   */
+  app.get('/providers/:address/stats', async (req, reply) => {
+    const { address } = req.params as { address: string };
+    const provider = await prisma.provider.findUnique({
+      where: { address },
+      select: { address: true, name: true, status: true },
+    });
+    if (!provider) return reply.code(404).send({ error: 'provider_not_found' });
+
+    const [grouped, settled] = await Promise.all([
+      prisma.voucher.groupBy({
+        by: ['status'],
+        where: { providerAddress: address },
+        _count: { _all: true },
+      }),
+      prisma.voucher.findMany({
+        where: { providerAddress: address, status: 'Settled' },
+        select: { amount: true },
+      }),
+    ]);
+
+    // Every status is present, zero included, so a client can render the
+    // full breakdown without filling gaps itself.
+    const byStatus: Record<string, number> = Object.fromEntries(
+      VOUCHER_STATUSES.map((status) => [status, 0]),
+    );
+    let vouchers = 0;
+    for (const row of grouped) {
+      byStatus[row.status] = (byStatus[row.status] ?? 0) + row._count._all;
+      vouchers += row._count._all;
+    }
+
+    const settledValue = settled
+      .reduce((acc, v) => acc + BigInt(v.amount), 0n)
+      .toString();
+
+    return {
+      address: provider.address,
+      name: provider.name,
+      status: provider.status,
+      vouchers,
+      byStatus,
+      settledVouchers: settled.length,
+      settledValue,
+      settledValueDisplay: fromBaseUnits(settledValue),
     };
   });
 

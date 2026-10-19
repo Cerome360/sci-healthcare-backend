@@ -1,0 +1,16 @@
+# Never copy host artifacts into the image: they are either rebuilt inside it
+# or would shadow the generated Prisma client.
+node_modules
+dist
+.git
+.github
+coverage
+
+# Local databases and secrets.
+*.db
+*.db-journal
+prisma/dev.db*
+prisma/test.db*
+.env
+.env.*
+!.env.example
