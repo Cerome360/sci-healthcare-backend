@@ -58,16 +58,17 @@
 - **Multi-status filter for vouchers**: `?status=Claimed,Attested` accepts comma-separated list validated against the status enum; invalid values rejected.
 - **`READY_MAX_LAG_LEDGERS`** (default `120`): lag in ledgers at which `/ready` reports degraded. The response echoes it as `checks.maxLagLedgers`.
 - **Split API and indexer entry points**: `npm run start:api` and `npm run start:indexer`; combined `npm start` stays the default. Commented two-service example in `render.yaml`.
-- **Indexer lease**: `IndexerState.leaseOwner` / `leaseExpiresAt` make the cursor single-writer. Standby instances log and retry instead of racing the cursor.
 - **Automated dependency updates**: `.github/dependabot.yml` opens one grouped npm PR a week (minor and patch) and one for GitHub Actions. Prisma updates arrive as their own PR labelled `do-not-merge`, so the auto-merge bot holds them until a maintainer has looked.
 - **CodeQL analysis**: `.github/workflows/codeql.yml` analyses JavaScript/TypeScript on pull requests into `main`, weekly and on demand, uploading results to code scanning. `src/__tests__/ci-workflows.test.ts` asserts the workflow keeps its triggers, permissions and actions.
 - **Uptime monitoring**: `.github/workflows/monitor.yml` probes the deployed `/ready` every 30 minutes, retrying so Render free-tier cold starts do not fail the run, and its badge is in the README. `docs/RUNBOOK.md` documents the free UptimeRobot setup, the alert contact and why `/ready` is the endpoint to watch rather than `/health`.
+- **Dependency audit in CI**: an `audit` job runs `npm audit --omit=dev --audit-level=high` on every pull request. High and critical advisories in production dependencies fail the build; moderate findings are reported but tolerated. The threshold is the `--audit-level` flag in `.github/workflows/ci.yml`.
 - **`docs/architecture.md`**: the indexer pipeline from RPC to API — paging and decoding, the cursor and lease model, idempotency rules and failure modes — linked from the README and `CONTRIBUTING.md`.
 
 ### Changed
 - **`/stats` response**: two new fields, `faucetDrips` and `faucetWallets`. Existing fields are unchanged.
 - **`/version` response**: `rpcUrl` is now the endpoint currently in use rather than the configured one (they differ only after a failover), plus a new `rpcUrls` array and `contracts.faucet`.
 - **Schema**: two new tables, `FaucetDrip` and `ReconcileMismatch`, added by the `20260103000000_faucet_drips_and_reconcile` migration. Nothing existing is touched and no backfill is needed.
+- **Dependency pins**: `fastify` 5.12.7, `@fastify/swagger-ui` 6.1.2, `@stellar/stellar-sdk` 17.2.1 and `vitest` 2.1.9 clear every high and critical advisory in the production tree — `npm audit --omit=dev` reports zero. The remaining advisories are dev-only and inside Prisma 6.x; the fix is the Prisma 7 major and is deliberately not taken in this change.
 - **List endpoints**: Prefer `cursor`/`limit` over `offset`/`limit`. Offset pagination still works but returns a `Deprecation` header.
 - **`IndexerState` schema**: three nullable columns added (`gap`, `gapOldestLedger`, `gapCursorLedger`); `prisma db push` adds them in place.
 - **Error responses**: every route now returns the one `{ error, message, details? }` envelope via the app-level error and not-found handlers. Unhandled failures are `internal_error`, with the cause left in the log rather than the response.
