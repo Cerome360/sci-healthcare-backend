@@ -1,5 +1,110 @@
 # Runbook
 
+## Backing up and restoring the database
+
+The database is a projection of the chain, never a source of truth: every
+row can be rebuilt by replaying ledger events (see `prisma/schema.prisma`
+and the full-reindex procedure under "Indexer falls outside the RPC
+retention window" below). A backup therefore buys *time*, not data
+survival — it saves a slow re-index, and beyond the RPC retention window
+(~7 days on testnet) it is the only way back to a complete read model
+without waiting for the chain to catch up.
+
+It also contains no patient records: the most sensitive column is
+`beneficiaryRef`, an opaque 32-byte commitment that is already public on
+chain (`docs/privacy.md`). Backups still deserve the same care as the
+database itself, because they make bulk correlation of that public data
+easier than the rate-limited API does. Keep them private and rotate them.
+
+### Production (Render Postgres)
+
+**Automatic backups.** Render's managed Postgres (`sci-healthcare-db` in
+`render.yaml`) takes daily backups; the actual retention for the current
+plan is listed under the database's **Backups** tab in the dashboard.
+Restoring from one creates a *new* database instance (a fork), so plan a
+service restart after the swap; the running web service picks up the new
+connection string because `DATABASE_URL` comes from the database via
+`render.yaml`.
+
+**A second copy off Render (`pg_dump` on a cron).** A custom-format dump
+is compressed, portable, and restorable into any Postgres. On any machine
+that can reach the internal connection string (the Render shell on the
+service works), install a nightly job:
+
+```cron
+# /etc/cron.d/sci-db-backup — 03:15 UTC nightly, keep 14 days
+15 3 * * * backup /usr/bin/pg_dump --format=custom --no-owner \
+  --dbname="$DATABASE_URL" "/backups/sci-$(date +\%F).dump" \
+  && /usr/bin/find /backups -name 'sci-*.dump' -mtime +14 -delete
+```
+
+Run it with `PGSSLMODE=require` (Render's connection string already
+requires TLS) and verify at least one restore per quarter — a backup
+nobody has restored is a rumour.
+
+**Restore from a dump** into a fresh database:
+
+1. Create an empty Postgres database (Render dashboard, or a scratch
+   instance — never overwrite the live one in place).
+2. `pg_restore --no-owner -d "$NEW_DATABASE_URL" /backups/sci-YYYY-MM-DD.dump`
+3. Point `DATABASE_URL` at it and restart the service. `npm run db:migrate`
+   runs on boot (`render.yaml` startCommand), so an older dump is
+   migrated up to the current schema before the indexer resumes.
+4. The indexer resumes from the `IndexerState.lastLedger` cursor inside
+   the restored data. If that cursor is older than the RPC retention
+   window, the service goes degraded on `/ready` — follow "Indexer falls
+   outside the RPC retention window" below.
+
+### Local development (SQLite)
+
+The default datasource is a SQLite file (`prisma/schema.prisma`). Back it
+up with the `sqlite3` online-backup command while nothing is writing, or
+with a plain file copy when the server is stopped:
+
+```bash
+sqlite3 prisma/dev.db ".backup /backups/dev-$(date +%F).db"
+# or, with the dev server stopped:
+cp prisma/dev.db /backups/dev-$(date +%F).db
+```
+
+Restore is the copy in the other direction. Delete the file first so a
+stale `-wal`/`-journal` file cannot shadow it, then start the server.
+
+### Restore drill — results
+
+- **2026-10-18, local SQLite (tested).** Created a scratch database with
+  `npx prisma db push`, seeded one provider, one voucher and an indexer
+  cursor of ledger 12345, took a cold file copy of the closed database,
+  deleted the original, restored the copy and reopened it. Result:
+  `PRAGMA integrity_check` → `ok`, provider count 1, voucher count 1,
+  cursor 12345 — the read model came back byte-for-byte. The Postgres
+  procedures above follow Render's documented managed-DB behaviour but
+  were not executed against the live instance from the dev machine (no
+  local Postgres toolchain); a maintained drill of the `pg_restore` path
+  against a scratch Render fork is tracked by this runbook's own
+  "verify at least one restore per quarter" rule.
+
+### Full reindex (no backup, or a backup you do not trust)
+
+Because the chain is the source of truth, a lost database is recoverable
+without any backup at all, as long as the events are still within RPC
+retention:
+
+1. Create an empty database (`prisma migrate deploy` for the schema).
+2. Set `INDEXER_START_LEDGER` to the oldest deployment ledger — the
+   `fromLedger` of the earliest row in the `Deployment` table, or the
+   deploy ledger recorded in `render.yaml` / the README when the table is
+   empty.
+3. Start the indexer. It replays every event from that ledger forward;
+   handlers are idempotent, so replaying is safe even if some rows
+   survived.
+4. When the cursor reaches the chain tip, spot-check the rebuild against
+   the chain with `npm run indexer:reconcile` (report only; exit 2 means
+   drift — see "The database disagrees with the chain" below).
+
+For an *existing* database that fell outside retention rather than being
+lost, see "Indexer falls outside the RPC retention window" below.
+
 ## Indexer falls outside the RPC retention window
 
 Soroban RPC retains roughly seven days of ledgers on testnet. If the

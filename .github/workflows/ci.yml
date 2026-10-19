@@ -46,7 +46,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx prisma generate
-      - run: npm test
+      # Coverage report with the thresholds configured in vitest.config.ts:
+      # the job prints the summary table and fails below them (issue #65).
+      - run: npm run test:coverage
 
   build:
     name: build
