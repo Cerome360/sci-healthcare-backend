@@ -94,9 +94,17 @@ not something a SQL file can decide. Until then this folder stays under
 
 ## What stays unchanged for dev/test
 
-`provider = "sqlite"`, every amount column `String`, and every JS `BigInt`
-workaround listed above. Dev and test behaviour is bit-for-bit what it is
-today; this plan adds no runtime change.
+`provider = "sqlite"`, every amount column `String`. The JS `BigInt`
+workarounds listed above still run **on SQLite** (receipts, providers,
+vouchers sort paths included): SQLite has no exact arbitrary-precision
+aggregate, so there SQL would be worse than JS. One exception landed ahead
+of the schema flip, because it needs no schema change: `GET /stats` on
+**Postgres** now sums `settledValue` / `feesCollected` / `settledVouchers`
+with a single `SUM(x::numeric)` aggregate (`settledTotals()` in
+`src/routes/health.ts`, branching on `isPostgres`). The `::numeric` cast is
+valid on today's `text` columns and a no-op after this migration lands, so
+the query survives the promotion unchanged. Dev/test behaviour on SQLite is
+bit-for-bit what it was; route tests are untouched.
 
 ## Follow-up sequence once maintainers adopt a Postgres dev/CI service
 
@@ -112,9 +120,11 @@ today; this plan adds no runtime change.
    Decimal fields (plain `String()` fails precision beyond 2^53 if anything
    has read them as JS numbers; Prisma returns `Decimal` objects, so
    `toFixed(0)`/`toString()` is exact).
-4. SQL-side aggregates replace the JS sums: `prisma.voucher.aggregate({
-   _sum: { amount, settledFee }, where: { status: 'Settled' } })` for
-   `settledValue`/`feesCollected` (currently `src/routes/health.ts:170-180`),
+4. SQL-side aggregates replace the remaining JS sums: on Postgres the
+   `GET /stats` totals already run in SQL (`settledTotals()` in
+   `src/routes/health.ts` — when this schema flip lands, delete its SQLite
+   branch and `prisma.voucher.aggregate({ _sum: { amount, settledFee },
+   where: { status: 'Settled' } })` can replace the raw query if preferred);
    `_sum: { amount }` for `totalSpend` (currently
    `src/routes/receipts.ts:145-146`) and a `groupBy` on `providerAddress`
    with `_sum` for the care summary (currently

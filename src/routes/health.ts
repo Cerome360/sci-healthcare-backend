@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { prisma } from '../db.js';
 import { env } from '../env.js';
+import { isPostgres } from '../lib/database.js';
 import { APP_VERSION, deployedCommit, STARTED_AT } from '../lib/version.js';
 import { server } from '../stellar/client.js';
 
@@ -25,6 +26,63 @@ type DailyRow = {
 /** The `YYYY-MM-DD` UTC day a timestamp falls on. */
 function utcDate(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+/** Settled-voucher totals for `GET /stats` (issue #60). */
+type SettledTotals = {
+  settledVouchers: number;
+  settledValue: string;
+  feesCollected: string;
+};
+
+/**
+ * Count and summed base units of settled vouchers, in exact i128 strings.
+ *
+ * On Postgres the sums are computed **in SQL** (#60): `SUM(x::numeric)` is
+ * arbitrary-precision, so it is exact for every amount the chain can
+ * produce, and the route stops fetching every settled voucher just to add
+ * them up in JavaScript — the scaling problem the issue names. The cast
+ * also works today, while the deploy columns are still `text` (decimal
+ * strings), and is a no-op once
+ * `prisma/postgres-pending/20260107000000_amount_numeric_to_decimal`
+ * lands, so this query needs no change when the migration is promoted.
+ *
+ * On SQLite the BigInt pass stays: SQLite's arithmetic caps integers at
+ * 2^63-1 and promotes larger sums to float64, so a SQL sum there would be
+ * inexact for exactly the values these columns exist to hold ("i128 as
+ * strings, never numbers"). Dropping this branch is the maintainers' call
+ * once dev/test run on Postgres (issue #14); see
+ * `docs/amount-numeric-migration-plan.md`.
+ */
+async function settledTotals(): Promise<SettledTotals> {
+  if (isPostgres) {
+    const [row] = await prisma.$queryRaw<SettledTotals[]>`
+      SELECT
+        COUNT(*)::int AS "settledVouchers",
+        COALESCE(SUM("amount"::numeric), 0)::text AS "settledValue",
+        COALESCE(SUM("settledFee"::numeric), 0)::text AS "feesCollected"
+      FROM "Voucher"
+      WHERE "status" = 'Settled'`;
+    // An aggregate SELECT without GROUP BY returns exactly one row. If the
+    // driver ever says otherwise, that is a bug in this query or the
+    // connection; fail loud rather than serve a fabricated zero.
+    if (!row) throw new Error('settledTotals: Postgres aggregate returned no row');
+    return row;
+  }
+
+  const settled = await prisma.voucher.findMany({
+    where: { status: 'Settled' },
+    select: { amount: true, settledFee: true },
+  });
+  return {
+    settledVouchers: settled.length,
+    settledValue: settled.reduce((acc, v) => acc + BigInt(v.amount), 0n).toString(),
+    // #52: what the protocol has earned, in the same exact i128 base-unit
+    // string as every other amount. Summed with BigInt because settled fees
+    // can exceed Number.MAX_SAFE_INTEGER; a settled voucher from before the
+    // fee column existed carries no fee and contributes nothing.
+    feesCollected: settled.reduce((acc, v) => acc + BigInt(v.settledFee ?? '0'), 0n).toString(),
+  };
 }
 
 export async function healthRoutes(app: FastifyInstance): Promise<void> {
@@ -174,15 +232,12 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
   app.get('/stats', {
     schema: { tags: ['health'], summary: 'Aggregate dashboard counters' },
   }, async () => {
-    const [providers, activeProviders, vouchers, settled, receipts, faucetDrips, faucetWallets] =
+    const [providers, activeProviders, vouchers, totals, receipts, faucetDrips, faucetWallets] =
       await Promise.all([
         prisma.provider.count(),
         prisma.provider.count({ where: { status: 'Active' } }),
         prisma.voucher.count(),
-        prisma.voucher.findMany({
-          where: { status: 'Settled' },
-          select: { amount: true, settledFee: true },
-        }),
+        settledTotals(),
         prisma.receipt.count(),
         prisma.faucetDrip.count(),
         // Distinct wallets, which is the figure worth reporting: one person
@@ -190,25 +245,13 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
         prisma.faucetDrip.groupBy({ by: ['wallet'] }),
       ]);
 
-    const settledValue = settled
-      .reduce((acc, v) => acc + BigInt(v.amount), 0n)
-      .toString();
-
-    // #52: what the protocol has earned, in the same exact i128 base-unit
-    // string as every other amount. Summed with BigInt because settled fees
-    // can exceed Number.MAX_SAFE_INTEGER; a settled voucher from before the
-    // fee column existed carries no fee and contributes nothing.
-    const feesCollected = settled
-      .reduce((acc, v) => acc + BigInt(v.settledFee ?? '0'), 0n)
-      .toString();
-
     return {
       providers,
       activeProviders,
       vouchers,
-      settledVouchers: settled.length,
-      settledValue,
-      feesCollected,
+      settledVouchers: totals.settledVouchers,
+      settledValue: totals.settledValue,
+      feesCollected: totals.feesCollected,
       receipts,
       // Both are 0 when no FAUCET_CONTRACT_ID is configured, because no
       // drip event ever reaches the indexer.

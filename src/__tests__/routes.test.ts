@@ -441,6 +441,37 @@ describe('GET /health and /stats', () => {
       await prisma.faucetDrip.deleteMany();
     }
   });
+
+  // #60: settledValue must stay exact at the top of the i128 range — the
+  // property the JS BigInt path guaranteed and the SQL path on Postgres
+  // reproduces (verified against a real Postgres in this PR's notes). This
+  // guards the SQLite branch of `settledTotals()` against a future
+  // float64/CAST-based rewrite: a Number accumulation here loses the low
+  // digits outright.
+  it('sums a settled i128-max amount into settledValue exactly', async () => {
+    const now = Date.now();
+    const I128_MAX = '340282366920938463463374607431768211455';
+    await prisma.voucher.create({
+      data: {
+        funder: FUNDER,
+        beneficiaryRef: REF,
+        providerAddress: CLINIC,
+        id: 'i128-max',
+        serviceCode: 101,
+        amount: I128_MAX,
+        status: 'Settled',
+        createdAt: new Date(now - DAY),
+        expiresAt: new Date(now + DAY),
+        settledFee: '1',
+      },
+    });
+
+    const { body } = await get('/stats');
+    // Seeded settled voucher (30000000 / fee 300000) + the i128-max row.
+    expect(body.settledVouchers).toBe(2);
+    expect(body.settledValue).toBe((BigInt(I128_MAX) + 30000000n).toString());
+    expect(body.feesCollected).toBe('300001');
+  });
 });
 
 describe('GET /version', () => {
