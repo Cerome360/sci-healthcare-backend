@@ -18,6 +18,8 @@ const UNREGISTERED_CLINIC = `G${'U'.repeat(55)}`;
 const FUNDER = 'GDUPJTF3PNSYJ73WWLNTYLG6UXN7HHBKCGFEEMDFMWKWGR3UMQT3JG45';
 const ADMIN = 'A'.repeat(56);
 const NEW_ADMIN = 'B'.repeat(56);
+const ATTESTER = 'GATTESTER'.padEnd(56, 'A');
+const FORMER_ATTESTER = 'GFORMER'.padEnd(56, 'B');
 const REF = '72676a6f4fff92b09ab1c6368672b05112062f683014d07c9518d4141d094745';
 const OTHER_REF = 'a'.repeat(64);
 const DAY = 24 * 60 * 60 * 1000;
@@ -179,7 +181,8 @@ async function seed() {
         createdAt: new Date(now - 31 * DAY),
         expiresAt: new Date(now - DAY),
       },
-      // Attested with the dispute window closed: settleable.
+      // Attested, by a known attester, with the dispute window closed:
+      // settleable.
       {
         ...base,
         id: '4',
@@ -188,9 +191,11 @@ async function seed() {
         status: 'Attested',
         createdAt: new Date(now - 5 * DAY),
         expiresAt: new Date(now + 25 * DAY),
+        attestedAt: new Date(now - 4 * DAY),
+        attestedBy: ATTESTER,
         disputeDeadline: new Date(now - 60_000),
       },
-      // Disputed, for someone else, with a reason.
+      // Disputed, for someone else, with a reason and a recorded outcome.
       {
         ...base,
         beneficiaryRef: OTHER_REF,
@@ -201,6 +206,9 @@ async function seed() {
         createdAt: new Date(now - 2 * DAY),
         expiresAt: new Date(now + 28 * DAY),
         disputeReason: 2,
+        disputeResolvedAt: new Date(now - DAY),
+        disputeResolvedBy: ADMIN,
+        disputeOutcome: 'Provider',
       },
     ],
   });
@@ -293,6 +301,56 @@ async function seed() {
       },
     ],
   });
+  await prisma.attester.createMany({
+    data: [
+      { address: ATTESTER, active: true, addedAt: at(40) },
+      {
+        address: FORMER_ATTESTER,
+        active: false,
+        addedAt: at(39),
+        removedAt: at(30),
+      },
+    ],
+  });
+  // Deliberately out of ledger order in creation, so the endpoint has to
+  // sort rather than rely on insertion order.
+  await prisma.contractEvent.createMany({
+    data: [
+      {
+        id: 'ce-2',
+        contractId: VOUCHER,
+        contract: 'voucher',
+        name: 'voucher_settled',
+        ledger: 22,
+        txHash: 'f'.repeat(64),
+        closedAt: at(6),
+        voucherId: '1',
+        data: JSON.stringify({ voucher_id: '1', net: '29700000', fee: '300000' }),
+      },
+      {
+        id: 'ce-1',
+        contractId: VOUCHER,
+        contract: 'voucher',
+        name: 'voucher_created',
+        ledger: 20,
+        txHash: 'e'.repeat(64),
+        closedAt: at(10),
+        voucherId: '1',
+        data: JSON.stringify({ voucher_id: '1', amount: '30000000' }),
+      },
+      {
+        id: 'ce-other',
+        contractId: REGISTRY,
+        contract: 'registry',
+        name: 'provider_registered',
+        ledger: 19,
+        txHash: 'd'.repeat(64),
+        closedAt: at(11),
+        voucherId: null,
+        data: '{}',
+      },
+    ],
+  });
 }
 
 beforeAll(async () => {
@@ -305,8 +363,10 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await prisma.contractEvent.deleteMany();
   await prisma.receipt.deleteMany();
   await prisma.voucher.deleteMany();
+  await prisma.attester.deleteMany();
   await prisma.service.deleteMany();
   await prisma.provider.deleteMany();
   await prisma.governanceEvent.deleteMany();
@@ -862,6 +922,15 @@ describe('GET /vouchers', () => {
     expect(body.vouchers[0]).toMatchObject({ id: '5', disputeReason: 2 });
   });
 
+  it('exposes the attester and the dispute outcome in the list view', async () => {
+    const { body } = await get(`/vouchers?provider=${CLINIC}`);
+    const v = (id: string) => body.vouchers.find((x: { id: string }) => x.id === id);
+
+    expect(v('4').attestedBy).toBe(ATTESTER);
+    expect(v('5')).toMatchObject({ disputeOutcome: 'Provider', disputeResolvedBy: ADMIN });
+    expect(v('2').attestedBy).toBeNull();
+  });
+
   it('filters by creation window, alone and combined with a funder', async () => {
     const from = encodeURIComponent(new Date(Date.now() - 6 * DAY).toISOString());
     const to = encodeURIComponent(new Date(Date.now() - 20 * DAY).toISOString());
@@ -1091,6 +1160,95 @@ describe('GET /vouchers/:id', () => {
   it('404s an unknown voucher', async () => {
     const { status } = await get('/vouchers/404');
     expect(status).toBe(404);
+  });
+
+  it('exposes who attested the voucher', async () => {
+    const { body } = await get('/vouchers/4');
+    expect(body.attestedBy).toBe(ATTESTER);
+  });
+
+  it('exposes how a dispute was resolved', async () => {
+    const { body } = await get('/vouchers/5');
+    expect(body).toMatchObject({ disputeOutcome: 'Provider', disputeResolvedBy: ADMIN });
+    expect(body.disputeResolvedAt).not.toBeNull();
+  });
+});
+
+describe('GET /vouchers/:id/events', () => {
+  it('returns the event log in ledger order with transaction hashes', async () => {
+    const { status, body } = await get('/vouchers/1/events');
+    expect(status).toBe(200);
+    expect(body.voucherId).toBe('1');
+    expect(body.total).toBe(2);
+    expect(body.events.map((e: { name: string }) => e.name)).toEqual([
+      'voucher_created',
+      'voucher_settled',
+    ]);
+    expect(body.events.map((e: { ledger: number }) => e.ledger)).toEqual([20, 22]);
+    expect(body.events[0].txHash).toBe('e'.repeat(64));
+    expect(body.events[0].data).toMatchObject({ amount: '30000000' });
+  });
+
+  it('returns an empty list for a voucher with no logged events', async () => {
+    const { body } = await get('/vouchers/2/events');
+    expect(body).toMatchObject({ voucherId: '2', total: 0, events: [] });
+  });
+
+  it('404s an unknown voucher', async () => {
+    const { status, body } = await get('/vouchers/404/events');
+    expect(status).toBe(404);
+    expect(body.error).toBe('voucher_not_found');
+  });
+});
+
+describe('GET /attesters', () => {
+  it('lists only active attesters by default, with attestation counts', async () => {
+    const { status, body } = await get('/attesters');
+    expect(status).toBe(200);
+    expect(body.total).toBe(1);
+    expect(body.attesters).toHaveLength(1);
+    expect(body.attesters[0]).toMatchObject({
+      address: ATTESTER,
+      active: true,
+      removedAt: null,
+      attestations: 1,
+    });
+  });
+
+  it('includes removed attesters with ?all=true', async () => {
+    const { body } = await get('/attesters?all=true');
+    expect(body.total).toBe(2);
+
+    const former = body.attesters.find(
+      (a: { address: string }) => a.address === FORMER_ATTESTER,
+    );
+    expect(former).toMatchObject({ active: false, attestations: 0 });
+    expect(former.removedAt).not.toBeNull();
+  });
+
+  it('rejects an invalid all value', async () => {
+    const { status, body } = await get('/attesters?all=maybe');
+    expect(status).toBe(400);
+    expect(body.error).toBe('invalid_query');
+  });
+});
+
+describe('GET /attesters/:address', () => {
+  it('returns one attester with its attestation count', async () => {
+    const { status, body } = await get(`/attesters/${ATTESTER}`);
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ address: ATTESTER, active: true, attestations: 1 });
+  });
+
+  it('returns a removed attester with zero attestations', async () => {
+    const { body } = await get(`/attesters/${FORMER_ATTESTER}`);
+    expect(body).toMatchObject({ active: false, attestations: 0 });
+  });
+
+  it('404s an unknown attester', async () => {
+    const { status, body } = await get(`/attesters/${FUNDER}`);
+    expect(status).toBe(404);
+    expect(body.error).toBe('attester_not_found');
   });
 });
 

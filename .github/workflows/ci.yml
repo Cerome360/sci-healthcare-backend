@@ -35,9 +35,38 @@ jobs:
       - run: npx prisma generate
       - run: npm run typecheck
 
+  # The same suite runs on both engines. SQLite is what contributors get
+  # with no setup; Postgres is what production runs, and the two disagree on
+  # string ordering and comparison in ways that only show up with real data.
   test:
-    name: test
+    name: test (${{ matrix.engine }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: sqlite
+            database-url: ''
+          - engine: postgres
+            database-url: 'postgresql://sci:sci@localhost:5432/sci_healthcare_test'
+    # Started for both entries; the SQLite entry simply never connects. The
+    # health gate keeps the Postgres entry from racing the container's boot.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sci
+          POSTGRES_PASSWORD: sci
+          POSTGRES_DB: sci_healthcare_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: ${{ matrix.database-url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -45,6 +74,10 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      # Prisma cannot read the provider from the environment, so the schema
+      # is switched before generating the client for Postgres.
+      - if: matrix.engine == 'postgres'
+        run: ./scripts/use-postgres.sh
       - run: npx prisma generate
       # Coverage report with the thresholds configured in vitest.config.ts:
       # the job prints the summary table and fails below them (issue #65).

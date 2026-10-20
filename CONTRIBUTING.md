@@ -81,6 +81,28 @@ CI still enforces the same rules.
   replays a full lifecycle and compares every table; a new handler that
   breaks replay fails there.
 
+## Testing
+
+`npm test` runs against a throwaway SQLite file, so it needs no services.
+
+CI runs the same suite against Postgres too — production is Postgres, and the
+two engines disagree on ordering and string comparison in ways that only show
+up with real data. To reproduce the Postgres job locally, point `DATABASE_URL`
+at a database you are happy to lose (the setup drops and recreates the `public`
+schema; it deliberately never uses `--force-reset` on a URL it did not create):
+
+```bash
+docker run --rm -e POSTGRES_USER=sci -e POSTGRES_PASSWORD=sci \
+  -e POSTGRES_DB=sci_healthcare_test -p 5432:5432 postgres:16
+
+./scripts/use-postgres.sh      # the provider is a literal in the schema
+npx prisma generate
+DATABASE_URL=postgresql://sci:sci@localhost:5432/sci_healthcare_test npm test
+```
+
+Do not commit the switched provider: `prisma/schema.prisma` stays `sqlite` on
+`main`, and CI switches it in the Postgres job.
+
 ## Decoding events
 
 The trap this codebase has already hit once: fields marked `#[topic]` in the

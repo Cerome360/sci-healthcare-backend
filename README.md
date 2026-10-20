@@ -112,6 +112,12 @@ stays in the log, never in the response.
 | `GET /providers/:address/stats` | A clinic's vouchers by status and its total settled value |
 | `GET /providers/:address/history` | Every status transition for a clinic, oldest first |
 | `GET /providers/:address/services/:code/history` | Every observed price for a service, oldest first |
+| `GET /attesters` | Attesters trusted to confirm care; `?all=true` includes removed ones |
+| `GET /attesters/:address` | One attester with its attestation count |
+| `GET /vouchers` | Vouchers by `funder`, `provider`, `beneficiaryRef` or `status` |
+| `GET /vouchers/:id` | One voucher, with its care receipt if settled, attester and dispute outcome |
+| `GET /vouchers/:id/events` | Every contract event for a voucher, oldest first, with transaction hashes |
+| `GET /receipts?beneficiaryRef=` | A patient's settled care history |
 | `GET /countries` | Countries with at least one active clinic and their clinic counts |
 | `GET /services` | Active services grouped by code: labels, clinic count, min/max/median price |
 | `GET /services/:code` | Active clinics offering a service code with their prices, cheapest first |
@@ -131,6 +137,10 @@ stays in the log, never in the response.
 with a cursor and streamed as an RFC 4180 download, so the export never has to
 fit in memory however many vouchers match. It deliberately has **no beneficiary
 reference column**.
+
+`GET /attesters` lists only attesters who can attest today unless `?all=true` is passed, and reports how many vouchers each has confirmed. `/attesters/:address` is the same for one attester.
+
+`GET /vouchers/:id/events` is the receipt trail: each event the indexer processed for that voucher, in ledger order, with the transaction hash that proved it. Events are appended in the same transaction as the state they update and keyed by the RPC event id, so replaying a ledger never duplicates a row.
 
 `/receipts` requires an exact `beneficiaryRef`. Because that value is an HMAC under a key held by the patient, the endpoint cannot be walked to enumerate people.
 

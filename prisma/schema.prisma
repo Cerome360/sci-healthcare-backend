@@ -89,10 +89,18 @@ model Voucher {
   expiresAt       DateTime
   claimedAt       DateTime?
   attestedAt      DateTime?
+  /// Attester that signed the attestation, from the voucher_attested topic.
+  /// Nullable so `prisma db push` adds it in place on the existing database.
+  attestedBy      String?
   disputeDeadline DateTime?
   /// reason_code from voucher_disputed; meanings are documented in
   /// docs/protocol/lifecycle.md. The contract treats it as opaque.
   disputeReason   Int?
+  /// How the dispute ended, from dispute_resolved. `disputeOutcome` is
+  /// 'Funder' when the funder was refunded, otherwise 'Provider'.
+  disputeResolvedAt DateTime?
+  disputeResolvedBy String?
+  disputeOutcome    String?
   settledNet      String?
   settledFee      String?
   /// When the voucher was refunded, from the voucher_refunded event's
@@ -133,6 +141,23 @@ model Voucher {
   @@index([expiresAt])
   @@index([createdAt])
   @@index([refundedAt])
+  @@index([attestedBy])
+}
+
+/// An attester trusted to confirm care, as announced on the registry.
+///
+/// `active` reflects the latest attester_added / attester_removed observed;
+/// the row is kept after removal so vouchers that cite it still resolve a
+/// name and the history of who could attest is not lost. New table, so
+/// `prisma db push` creates it without touching existing rows.
+model Attester {
+  address   String    @id
+  active    Boolean   @default(true)
+  addedAt   DateTime
+  removedAt DateTime?
+  updatedAt DateTime  @updatedAt
+
+  @@index([active])
 }
 
 model Receipt {
@@ -201,6 +226,30 @@ model ServicePriceChange {
   changedAt       DateTime
 
   @@index([providerAddress, code, ledger])
+}
+
+/// Append-only log of every contract event the indexer processes.
+///
+/// The projection tables only hold the latest state; this keeps what
+/// happened, in ledger order, with the transaction that proved it. `id` is
+/// the RPC event id, so replaying a page upserts rather than duplicates.
+/// `voucherId` is null for events that are not about a voucher.
+model ContractEvent {
+  id         String   @id // RPC event id, unique
+  contractId String
+  contract   String // registry | voucher | receipt
+  name       String
+  ledger     Int
+  txHash     String
+  closedAt   DateTime
+  voucherId  String?
+  /// Decoded fields serialised as JSON. Addresses and amounts are stored
+  /// as strings, never JS numbers, because i128 loses precision above 2^53.
+  /// Text rather than a native JSON column: SQLite has no JSON type and
+  /// tests run on both engines.
+  data       String
+
+  @@index([voucherId, ledger])
 }
 
 /// An event the indexer could not project.

@@ -25,12 +25,14 @@ import { server } from './client.js';
 import {
   asAddress,
   asAmount,
+  asBoolean,
   asHex,
   asId,
   asNumber,
   asTimestamp,
   decodeEvent,
   providerStatusName,
+  serialiseEventData,
   type DecodedEvent,
 } from './events.js';
 import { recordFailure } from './failed.js';
@@ -65,13 +67,22 @@ type PendingSignal = {
  * backend has never seen, which is worth one warning per process: a silent
  * ignore would hide a contract upgrade that emits something new.
  */
-const IGNORED_EVENTS = new Set([
-  'initialized',
-  'attester_added',
-  'attester_removed',
-  'dispute_resolved',
-  'minter_changed',
-]);
+const IGNORED_EVENTS = new Set(['initialized', 'minter_changed']);
+
+/**
+ * The voucher an event is about, if any. Events without a `voucher_id`
+ * (providers, services, governance, attesters) log with a null voucher so
+ * the append-only history can still be stored for them.
+ */
+function voucherIdOf(fields: Record<string, unknown>): string | null {
+  const id = fields.voucher_id;
+  if (id === undefined || id === null) return null;
+  try {
+    return asId(id);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Polls Soroban RPC for contract events and projects them into the read
@@ -661,6 +672,9 @@ export class Indexer {
    * holds the transaction, and only it knows whether the writes survive.
    */
   private async project(e: DecodedEvent, db: Db): Promise<PendingSignal | null> {
+    // Logged in the same transaction as the projection, so the log can never
+    // claim an event whose projection rolled back, or the reverse.
+    await this.recordEvent(db, e);
     const d = e.fields;
     switch (e.name) {
       case 'provider_registered':
@@ -681,6 +695,15 @@ export class Indexer {
       case 'admin_changed':
         await this.onAdminChanged(db, e);
         return null;
+      case 'attester_added':
+        await this.onAttesterAdded(db, e);
+        return null;
+      case 'attester_removed':
+        await this.onAttesterRemoved(db, e);
+        return null;
+      case 'dispute_resolved':
+        await this.onDisputeResolved(db, e);
+        return null;
       case 'voucher_created':
         await this.onVoucherCreated(db, e);
         return this.voucherSignal(e, 'Funded', this.topicProvider(e));
@@ -700,6 +723,7 @@ export class Indexer {
           'Attested',
           {
             attestedAt: asTimestamp(d.attested_at),
+            attestedBy: asAddress(d.attester),
             disputeDeadline: asTimestamp(d.dispute_deadline),
           },
           null,
@@ -819,6 +843,68 @@ export class Indexer {
       },
       'unknown event ignored; this name will not be logged again',
     );
+  }
+
+  /** Appends the event to the append-only log. Idempotent on the event id. */
+  private async recordEvent(db: Db, e: DecodedEvent): Promise<void> {
+    await db.contractEvent.upsert({
+      where: { id: e.id },
+      create: {
+        id: e.id,
+        contractId: e.contractId,
+        contract: contractName(e.contractId),
+        name: e.name,
+        ledger: e.ledger,
+        txHash: e.txHash,
+        closedAt: e.ledgerClosedAt,
+        voucherId: voucherIdOf(e.fields),
+        data: serialiseEventData(e.fields),
+      },
+      update: {},
+    });
+  }
+
+  /**
+   * An attester was added to the registry. Re-adding one that was removed
+   * reactivates the row, matching the contract, where an address is either
+   * in the set or not.
+   */
+  private async onAttesterAdded(db: Db, e: DecodedEvent): Promise<void> {
+    const address = asAddress(e.fields.attester);
+    await db.attester.upsert({
+      where: { address },
+      create: { address, active: true, addedAt: e.ledgerClosedAt },
+      update: { active: true, removedAt: null },
+    });
+  }
+
+  private async onAttesterRemoved(db: Db, e: DecodedEvent): Promise<void> {
+    const address = asAddress(e.fields.attester);
+    // Upsert rather than update: a removal can be the first event this
+    // indexer sees for an attester added before its start ledger.
+    await db.attester.upsert({
+      where: { address },
+      create: { address, active: false, addedAt: e.ledgerClosedAt, removedAt: e.ledgerClosedAt },
+      update: { active: false, removedAt: e.ledgerClosedAt },
+    });
+  }
+
+  /**
+   * Records who resolved a dispute and how. The voucher's final status
+   * arrives separately through voucher_settled or voucher_refunded in the
+   * same transaction, so this only writes the outcome fields and works in
+   * either order.
+   */
+  private async onDisputeResolved(db: Db, e: DecodedEvent): Promise<void> {
+    const id = asId(e.fields.voucher_id);
+    await db.voucher.updateMany({
+      where: { id },
+      data: {
+        disputeResolvedAt: e.ledgerClosedAt,
+        disputeResolvedBy: asAddress(e.fields.admin),
+        disputeOutcome: asBoolean(e.fields.refunded_funder) ? 'Funder' : 'Provider',
+      },
+    });
   }
 
   private async onProviderRegistered(db: Db, e: DecodedEvent): Promise<void> {
