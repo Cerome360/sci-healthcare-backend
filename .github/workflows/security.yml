@@ -32,8 +32,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  security-scan:
-    name: security-scan
+  scan:
+    # Not "security-scan": that name belongs to the commit status the scan
+    # posts, which is what branch protection and the bot require. This job
+    # succeeds whenever the scan completes, whatever it found.
+    name: malware scan
     # Re-runs on labels only for the maintainer review label.
     if: github.event.action != 'labeled' || github.event.label.name == 'security-reviewed'
     runs-on: ubuntu-latest
