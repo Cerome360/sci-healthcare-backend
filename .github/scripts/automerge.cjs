@@ -10,6 +10,10 @@
 // pull request: without this, editing ci.yml to skip the tests would be
 // enough to get merged.
 //
+// Every pull request must also pass the malware and supply-chain scan
+// (.github/workflows/security.yml), which reports the `security-scan` commit
+// status from the default branch. The bot never merges without it.
+//
 // Drips Wave awards points only when the issue assigned to the contributor
 // is closed as completed. So a contributor's pull request must link at least
 // one issue assigned to them, and after merging the bot closes the linked
@@ -18,6 +22,17 @@
 const MARKER = '<!-- sci-automerge';
 const PASSING = new Set(['success', 'neutral', 'skipped']);
 const BOT_JOB = 'auto-merge';
+const SECURITY_CONTEXT = 'security-scan';
+
+/** Keeps the latest check run per name, so a re-run replaces the run it repeats. */
+function latestByName(checkRuns) {
+  const latest = new Map();
+  for (const c of checkRuns) {
+    const prev = latest.get(c.name);
+    if (!prev || (c.id || 0) > (prev.id || 0)) latest.set(c.name, c);
+  }
+  return [...latest.values()];
+}
 
 /** Turns a simple glob (`**`, `*`) into a RegExp anchored to the whole path. */
 function globToRegExp(glob) {
@@ -67,7 +82,7 @@ function approvedByWriter(reviews, headSha, writers) {
  * Returns { action: 'merge' | 'wait' | 'comment' | 'skip', reason, detail? }.
  * 'comment' means: do not merge, and tell the author why (once per commit).
  */
-function evaluate({ pr, ciRuns, checkRuns, files, reviews, writers, patterns, author, linkedIssues = [] }) {
+function evaluate({ pr, ciRuns, checkRuns, files, reviews, writers, patterns, author, linkedIssues = [], security }) {
   if (pr.state !== 'open') return { action: 'skip', reason: 'not-open' };
   if (pr.draft) return { action: 'skip', reason: 'draft' };
   if (pr.labels.some((l) => l.name === 'do-not-merge')) return { action: 'skip', reason: 'do-not-merge' };
@@ -81,10 +96,16 @@ function evaluate({ pr, ciRuns, checkRuns, files, reviews, writers, patterns, au
   if (latestCi.conclusion !== 'success') return { action: 'skip', reason: 'ci-failed' };
 
   // Every GitHub Actions check on the commit, not only CI, must be green.
-  const checks = checkRuns.filter((c) => c.name !== BOT_JOB);
+  // The security job reports through its commit status, checked below.
+  const checks = latestByName(checkRuns).filter((c) => c.name !== BOT_JOB && c.name !== SECURITY_CONTEXT);
   if (checks.some((c) => c.status !== 'completed')) return { action: 'wait', reason: 'checks-running' };
   const failed = checks.filter((c) => !PASSING.has(c.conclusion));
   if (failed.length) return { action: 'skip', reason: 'checks-failed', detail: failed.map((c) => c.name) };
+
+  // The malware scan must have passed on this exact commit. Its findings are
+  // explained on the pull request by the scan itself.
+  if (!security || security.state === 'pending') return { action: 'wait', reason: 'security-scan-pending' };
+  if (security.state !== 'success') return { action: 'skip', reason: 'security-scan-failed' };
 
   if (pr.mergeable === null) return { action: 'wait', reason: 'mergeability-unknown' };
   if (pr.mergeable === false || pr.mergeable_state === 'dirty') {
@@ -247,7 +268,7 @@ async function handle({ github, context, core, pr, patterns }) {
   }
   const sha = full.head.sha;
 
-  const [ciRuns, checkRuns, filesRaw, reviews, linkedIssues, authorPerm] = await Promise.all([
+  const [ciRuns, checkRuns, filesRaw, reviews, linkedIssues, authorPerm, security] = await Promise.all([
     github.rest.actions
       .listWorkflowRuns({ owner, repo, workflow_id: 'ci.yml', head_sha: sha, per_page: 20 })
       .then((r) => r.data.workflow_runs.filter((w) => w.event === 'pull_request')),
@@ -258,6 +279,9 @@ async function handle({ github, context, core, pr, patterns }) {
     paginate(github, github.rest.pulls.listReviews, { owner, repo, pull_number: full.number }),
     linkedIssuesOf({ github, owner, repo, number: full.number }),
     permissionOf({ github, owner, repo, username: full.user.login }),
+    github.rest.repos
+      .getCombinedStatusForRef({ owner, repo, ref: sha, per_page: 100 })
+      .then((r) => r.data.statuses.find((s) => s.context === SECURITY_CONTEXT) || null),
   ]);
   const author = {
     login: full.user.login,
@@ -272,7 +296,7 @@ async function handle({ github, context, core, pr, patterns }) {
     if (perm === 'admin' || perm === 'write') writers.add(login);
   }
 
-  const decision = evaluate({ pr: full, ciRuns, checkRuns, files, reviews, writers, patterns, author, linkedIssues });
+  const decision = evaluate({ pr: full, ciRuns, checkRuns, files, reviews, writers, patterns, author, linkedIssues, security });
   core.info(`#${full.number} @ ${sha.slice(0, 7)}: ${decision.action} (${decision.reason})`);
 
   if (decision.action === 'comment') {
@@ -330,7 +354,7 @@ ${key}`,
 
   await github.rest.issues.createComment({
     owner, repo, issue_number: full.number,
-    body: `Merged automatically: every CI check passed on ${sha.slice(0, 7)}.${
+    body: `Merged automatically: every CI check and the security scan passed on ${sha.slice(0, 7)}.${
       closed.length ? ` Closed ${closed.join(', ')} as completed.` : ''
     } Thank you for contributing!\n\n${MARKER} merged ${sha} -->`,
   });
@@ -374,6 +398,7 @@ async function run({ github, context, core }) {
 
 module.exports = run;
 module.exports.evaluate = evaluate;
+module.exports.latestByName = latestByName;
 module.exports.globToRegExp = globToRegExp;
 module.exports.parsePatterns = parsePatterns;
 module.exports.approvedByWriter = approvedByWriter;

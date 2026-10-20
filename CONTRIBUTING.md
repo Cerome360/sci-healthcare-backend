@@ -142,9 +142,19 @@ A bot merges pull requests automatically (squash) as soon as every CI check on t
 - is not a draft and has no `do-not-merge` label,
 - links the issue you were assigned on Drips Wave, with a line such as `Closes #123` in the description (Wave points are awarded when that issue is closed as completed, which the bot does on merge),
 - has no merge conflicts and is up to date with `main` (the bot comments if it is behind),
+- passes the security scan (the `security-scan` status, see below),
 - and, if it changes anything under `.github/` (CI workflows and repository automation), has been approved by a maintainer. The bot comments with the files that need approval.
 
 So open your pull request as a draft until it is ready, and keep CI green. To stop an automatic merge, add the `do-not-merge` label or convert the pull request back to a draft.
+
+### Security scan
+
+Every pull request is scanned for malicious changes before it can be merged. The scan runs from `main`, reads your changes as data and never runs them. It reports on the pull request as the `security-scan` status and, if anything needs attention, in a comment listing each finding.
+
+- **block** findings are never merged automatically. Examples are executables and unexpected binaries, hidden or bidirectional Unicode characters (Trojan Source), crypto miners, reverse shells, piping a download into a shell, reading credential files, dependencies from git URLs, tarballs or paths outside the repository, look-alike (typosquatted) package names, packages that do not exist on npm, lockfile entries from another registry or without an integrity hash, crates from outside crates.io, and packages listed as malware in the OSV database.
+- **review** findings are common in legitimate work but also how malware gets in. Examples are new dependencies that are recent or rarely used, changed npm scripts, `eval` and spawned processes, encoded or minified code, new network hosts or Stellar addresses, shell scripts, and security-sensitive files. A maintainer reads the change and adds the `security-reviewed` label, after which it merges as usual. A new push removes the label, so the latest commit is always the one reviewed.
+
+If a finding is a false positive, say so on the pull request; please do not try to reword code to get past the scan.
 
 ## Wave program
 

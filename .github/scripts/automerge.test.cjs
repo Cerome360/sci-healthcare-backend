@@ -21,7 +21,7 @@ function pr(over = {}) {
 const ci = (status = 'completed', conclusion = 'success') => [
   { status, conclusion, created_at: '2026-10-16T10:00:00Z' },
 ];
-const checks = (...xs) => xs.map(([name, status = 'completed', conclusion = 'success']) => ({ name, status, conclusion }));
+const checks = (...xs) => xs.map(([name, status = 'completed', conclusion = 'success', id = 1]) => ({ name, status, conclusion, id }));
 
 function base(over = {}) {
   return {
@@ -29,6 +29,7 @@ function base(over = {}) {
     files: ['src/app.ts'], reviews: [], writers: new Set(), patterns,
     author: { login: 'dev', isWriter: false, isBot: false },
     linkedIssues: [{ number: 12, state: 'OPEN', assignees: ['dev'] }],
+    security: { state: 'success' },
     ...over,
   };
 }
@@ -134,4 +135,28 @@ test('maintainers and bots do not need a linked issue', () => {
   const b = { login: 'b', isWriter: false, isBot: true };
   assert.equal(evaluate(base({ linkedIssues: [], author: m })).action, 'merge');
   assert.equal(evaluate(base({ linkedIssues: [], author: b })).action, 'merge');
+});
+
+test('never merges without a passing security scan on the commit', () => {
+  assert.deepEqual(evaluate(base({ security: null })), { action: 'wait', reason: 'security-scan-pending' });
+  assert.equal(evaluate(base({ security: { state: 'pending' } })).action, 'wait');
+  assert.deepEqual(evaluate(base({ security: { state: 'failure' } })), { action: 'skip', reason: 'security-scan-failed' });
+  assert.equal(evaluate(base({ security: { state: 'error' } })).action, 'skip');
+  // Maintainers are scanned too.
+  const m = { login: 'm', isWriter: true, isBot: false };
+  assert.equal(evaluate(base({ author: m, security: null })).action, 'wait');
+});
+
+test('the security job check run is ignored in favour of its commit status', () => {
+  const runs = checks(['lint'], ['security-scan', 'completed', 'skipped']);
+  assert.equal(evaluate(base({ checkRuns: runs, security: { state: 'failure' } })).action, 'skip');
+  const failedJob = checks(['lint'], ['security-scan', 'completed', 'failure']);
+  assert.equal(evaluate(base({ checkRuns: failedJob, security: { state: 'success' } })).action, 'merge');
+});
+
+test('a re-run check replaces the run it repeats', () => {
+  const runs = checks(['test', 'completed', 'failure', 1], ['test', 'completed', 'success', 2]);
+  assert.equal(evaluate(base({ checkRuns: runs })).action, 'merge');
+  const worse = checks(['test', 'completed', 'success', 1], ['test', 'completed', 'failure', 2]);
+  assert.equal(evaluate(base({ checkRuns: worse })).action, 'skip');
 });

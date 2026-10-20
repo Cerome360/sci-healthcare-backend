@@ -1,14 +1,15 @@
 name: Auto-merge
 
-# Merges a pull request as soon as every GitHub Actions check on its latest
-# commit has passed. Logic and tests: .github/scripts/automerge.cjs.
+# Merges a pull request as soon as every GitHub Actions check and the
+# security scan (security.yml) have passed on its latest
+# commit. Logic and tests: .github/scripts/automerge.cjs.
 #
 # Security: this workflow runs the copy of itself on the default branch, with
 # a write token, and never checks out or executes code from the pull request.
 
 on:
   workflow_run:
-    workflows: [CI]
+    workflows: [CI, Security scan]
     types: [completed]
   pull_request_target:
     # opened/synchronize: approve the CI run GitHub holds for first-time

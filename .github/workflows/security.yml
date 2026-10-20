@@ -1,0 +1,111 @@
+name: Security scan
+
+# Malware and supply-chain gate for pull requests. Posts the `security-scan`
+# commit status that the auto-merge bot and branch protection require.
+# Logic and tests: .github/scripts/security-scan.cjs; settings:
+# .github/security-scan.json.
+#
+# Runs as pull_request_target so the workflow and scanner always come from
+# the default branch: a pull request cannot weaken the scan that judges it.
+# The pull request is fetched as git objects and read as data only. Nothing
+# from it is checked out, installed, built or executed here.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, ready_for_review]
+  # Maintainers: scan a pull request on demand (e.g. one opened before the
+  # scan existed, or after changing the settings).
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to scan
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: security-scan-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  security-scan:
+    name: security-scan
+    # Re-runs on labels only for the maintainer review label.
+    if: github.event.action != 'labeled' || github.event.label.name == 'security-reviewed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve the pull request
+        id: pr
+        uses: actions/github-script@v8
+        env:
+          PR_INPUT: ${{ inputs.pr }}
+        with:
+          script: |
+            const pr = context.payload.pull_request
+              || (await github.rest.pulls.get({ ...context.repo, pull_number: Number(process.env.PR_INPUT) })).data;
+            if (pr.state !== 'open') core.setFailed(`#${pr.number} is not open`);
+            core.setOutput('number', String(pr.number));
+            core.setOutput('sha', pr.head.sha);
+            await github.rest.repos.createCommitStatus({
+              ...context.repo,
+              sha: pr.head.sha,
+              state: 'pending',
+              context: 'security-scan',
+              description: 'Scanning the pull request for malicious changes',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+
+      - name: Check out the default branch (trusted scanner)
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          path: trusted
+          persist-credentials: false
+
+      - name: Fetch the pull request as data
+        working-directory: trusted
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+        run: git fetch --no-tags origin "+refs/pull/${PR}/head:refs/remotes/pr/head"
+
+      - name: Install OSV-Scanner (pinned version, checksum verified)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/osv-scanner" \
+            https://github.com/google/osv-scanner/releases/download/v2.7.0/osv-scanner_linux_amd64
+          echo "160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b  $RUNNER_TEMP/osv-scanner" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/osv-scanner"
+
+      - name: Scan
+        uses: actions/github-script@v8
+        env:
+          TRUSTED_DIR: ${{ github.workspace }}/trusted
+          OSV_SCANNER: ${{ runner.temp }}/osv-scanner
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        with:
+          script: |
+            process.chdir(process.env.TRUSTED_DIR);
+            const run = require(`${process.env.TRUSTED_DIR}/.github/scripts/security-scan.cjs`);
+            await run({ github, context, core });
+
+      # Fail closed: an error in the scan itself must never leave a passing
+      # or missing status behind.
+      - name: Report a scan error
+        if: (failure() || cancelled()) && steps.pr.outputs.sha
+        uses: actions/github-script@v8
+        env:
+          SHA: ${{ steps.pr.outputs.sha }}
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              ...context.repo,
+              sha: process.env.SHA,
+              state: 'error',
+              context: 'security-scan',
+              description: 'The security scan did not complete; not mergeable until it does',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
