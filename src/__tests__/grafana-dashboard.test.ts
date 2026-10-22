@@ -61,7 +61,7 @@ function appMetricRefs(expr: string): string[] {
   const refs: string[] = [];
   for (const match of expr.matchAll(/\b([a-z][a-z0-9_]*)\b/g)) {
     const token = match[1] as string;
-    if (!/^(http|indexer|events|stream)_/.test(token)) continue;
+    if (!/^(http|indexer|events|stream|webhook)_/.test(token)) continue;
     if (promqlKeywords.has(token)) continue;
     refs.push(token.replace(/_(bucket|sum|count)$/, ''));
   }

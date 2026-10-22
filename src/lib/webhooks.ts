@@ -5,6 +5,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import { prisma } from '../db.js';
 import { env, WEBHOOK_URLS, WEBHOOKS_ENABLED } from '../env.js';
+import { webhookDeliveriesAbandoned, webhookDeliveriesPending } from './metrics.js';
 
 /**
  * Signed webhook notifications for voucher events.
@@ -97,6 +98,61 @@ export function backoffMs(attempt: number, base = WEBHOOK_BASE_BACKOFF_MS, max =
   return Math.min(base * 2 ** exponent, max);
 }
 
+/**
+ * Outbox backlog, as reported by `/ready` and by the gauges on `/metrics`.
+ *
+ * These are the deliveries a clinic is still waiting on, in the one place an
+ * operator already watches. Counting rows rather than reading payloads keeps
+ * this free of anything patient-linked.
+ */
+export type WebhookBacklog = {
+  /** Queued rows that are neither delivered nor abandoned. */
+  pending: number;
+  /** Pending rows older than `READY_WEBHOOK_MAX_AGE_MS`. */
+  stale: number;
+  /** Rows given up on: retries exhausted, or a permanent 4xx response. */
+  abandoned: number;
+  /** Age in seconds of the oldest pending row, or null when none is queued. */
+  oldestPendingAgeSeconds: number | null;
+};
+
+/**
+ * Reads the outbox backlog and publishes it to the webhook gauges.
+ *
+ * The gauge update lives here so `/ready` and the delivery loop cannot
+ * report different numbers for the same table: both call this function. A
+ * row that stayed pending past the threshold means the loop is not running
+ * or cannot reach the database, because every retry of a reachable endpoint
+ * resolves inside the backoff ceiling.
+ */
+export async function webhookBacklog(now: Date = new Date()): Promise<WebhookBacklog> {
+  const staleBefore = new Date(now.getTime() - env.READY_WEBHOOK_MAX_AGE_MS);
+  const pendingWhere = { deliveredAt: null, abandonedAt: null };
+
+  const [pending, stale, abandoned, oldest] = await Promise.all([
+    prisma.webhookDelivery.count({ where: pendingWhere }),
+    prisma.webhookDelivery.count({ where: { ...pendingWhere, createdAt: { lt: staleBefore } } }),
+    prisma.webhookDelivery.count({ where: { abandonedAt: { not: null } } }),
+    prisma.webhookDelivery.findFirst({
+      where: pendingWhere,
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true },
+    }),
+  ]);
+
+  webhookDeliveriesPending.set(pending);
+  webhookDeliveriesAbandoned.set(abandoned);
+
+  return {
+    pending,
+    stale,
+    abandoned,
+    oldestPendingAgeSeconds: oldest
+      ? Math.max(0, Math.floor((now.getTime() - oldest.createdAt.getTime()) / 1000))
+      : null,
+  };
+}
+
 type OutboxRow = {
   id: string;
   url: string;
@@ -132,6 +188,7 @@ export class WebhookDispatcher {
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
   private delivering = false;
+  private refreshingBacklog = false;
 
   private readonly urls: readonly string[];
   private readonly secret: string;
@@ -191,6 +248,22 @@ export class WebhookDispatcher {
     if (this.stopped) return;
     try {
       await this.deliverPending();
+      // Refresh the gauges even when nothing was due, so `/metrics` reflects
+      // the outbox rather than only the cycles that happened to deliver.
+      // Deliberately not awaited: a slow count must not delay the next
+      // delivery, and an unreadable count is a metrics problem rather than a
+      // failed delivery cycle. One refresh in flight at a time keeps a slow
+      // database from queueing one query per interval.
+      if (!this.refreshingBacklog) {
+        this.refreshingBacklog = true;
+        void webhookBacklog(this.now())
+          .catch((err: unknown) => {
+            this.log.warn({ err }, 'webhook backlog metrics could not be refreshed');
+          })
+          .finally(() => {
+            this.refreshingBacklog = false;
+          });
+      }
     } catch (err) {
       this.log.error({ err }, 'webhook delivery cycle failed');
     } finally {

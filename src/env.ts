@@ -24,6 +24,13 @@ export const schema = z.object({
     .default('info'),
   CORS_ORIGIN: z.string().default('http://localhost:3000'),
   READY_MAX_LAG_LEDGERS: z.coerce.number().int().nonnegative().default(120),
+  /**
+   * How long a webhook delivery may stay pending before `/ready` reports the
+   * backlog. Every retry finishes inside the backoff ceiling (six attempts
+   * within a few minutes), so anything older than this means the delivery
+   * loop is not draining the outbox, not that an endpoint is slow.
+   */
+  READY_WEBHOOK_MAX_AGE_MS: z.coerce.number().int().positive().default(900_000),
 
   DATABASE_URL: z.string().min(1),
 

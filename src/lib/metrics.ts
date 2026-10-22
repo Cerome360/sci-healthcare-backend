@@ -74,3 +74,24 @@ export const streamConnections = new Gauge({
   help: 'Server-sent event streams currently open in this process',
   registers: [registry],
 });
+
+/**
+ * Webhook outbox backlog, as last measured by the delivery loop.
+ *
+ * `webhook_deliveries_pending` is the number of rows neither delivered nor
+ * abandoned; a value that does not reach zero means the loop is not
+ * draining, which is the same condition `/ready` reports as a stale
+ * backlog. `webhook_deliveries_abandoned` counts deliveries given up on:
+ * those clinics were never told about a voucher event.
+ */
+export const webhookDeliveriesPending = new Gauge({
+  name: 'webhook_deliveries_pending',
+  help: 'Webhook deliveries queued but not yet delivered or abandoned',
+  registers: [registry],
+});
+
+export const webhookDeliveriesAbandoned = new Gauge({
+  name: 'webhook_deliveries_abandoned',
+  help: 'Webhook deliveries given up on after retries or a permanent response',
+  registers: [registry],
+});

@@ -103,7 +103,7 @@ stays in the log, never in the response.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Liveness |
-| `GET /ready` | Readiness; 503 once the indexer trails by more than `READY_MAX_LAG_LEDGERS` |
+| `GET /ready` | Readiness; 503 once the indexer trails by more than `READY_MAX_LAG_LEDGERS`, a failed event is dead-lettered, or a webhook delivery is stuck in the outbox |
 | `GET /version` | Build version and commit, network, RPC endpoints, contract ids, indexer start ledger and process start time |
 | `GET /stats` | Protocol counters for the dashboard |
 | `GET /stats/daily?days=30` | Funded / settled / refunded counts and value per UTC day (`days` 1–365, max 365) |
@@ -531,6 +531,17 @@ indexer. Failed deliveries retry with exponential backoff (five seconds
 doubling, capped at ten minutes) and are given up on after six attempts or a
 permanent 4xx response.
 
+A backlog is visible instead of silent. `GET /ready` reports
+`checks.webhooks` — `state` (`ok`, `backlog` or `disabled`), `pending`,
+`abandoned`, `oldestPendingAgeSeconds` and `maxPendingAgeSeconds` — and
+answers 503 once a delivery has been pending longer than
+`READY_WEBHOOK_MAX_AGE_MS` (default fifteen minutes), because a healthy loop
+drains every retry far sooner than that. `/metrics` exposes the same counts
+as `webhook_deliveries_pending` and `webhook_deliveries_abandoned`, which is
+what the `SciWebhookBacklog` rule in `ops/alerts.yml` watches. Abandoned
+rows are never retried: those clinics missed those events, which is why the
+count is reported separately rather than folded into the log.
+
 Each request is `POST` with a JSON body and an `X-SCI-Signature` header holding
 the hex HMAC-SHA256 of the **raw request body** under `WEBHOOK_SECRET`:
 
@@ -617,6 +628,7 @@ this table and the schema drift apart.
 | `LOG_LEVEL` | No | `info` | `info` | pino log level: `fatal`, `error`, `warn`, `info`, `debug` or `trace` |
 | `CORS_ORIGIN` | No | `http://localhost:3000` | `https://sci-healthcare.vercel.app` | Comma-separated origins allowed to call the API |
 | `READY_MAX_LAG_LEDGERS` | No | `120` | `120` | Indexer lag in ledgers at which `/ready` reports degraded (503) |
+| `READY_WEBHOOK_MAX_AGE_MS` | No | `900000` | `900000` | Age at which a pending webhook delivery makes `/ready` report a backlog and answer 503 |
 | `DATABASE_URL` | Yes | — | `file:./dev.db` | Database connection string. SQLite paths resolve **relative to `prisma/`**; production uses a Postgres URL |
 | `STELLAR_NETWORK` | No | `testnet` | `testnet` | Stellar network: `testnet`, `public` or `futurenet` |
 | `SOROBAN_RPC_URL` | No | — | `https://soroban-testnet.stellar.org` | Soroban RPC endpoint (used when `SOROBAN_RPC_URLS` is unset) |
@@ -641,6 +653,8 @@ this table and the schema drift apart.
 Set `INDEXER_START_LEDGER` to the deployment ledger. Leaving it at `0` starts at the current tip and silently skips all prior history. Soroban RPC also only retains a rolling window of ledgers (about 7 days on testnet) — an indexer that falls further behind than the window cannot catch up, and `/ready` will say so rather than pretend otherwise.
 
 `READY_MAX_LAG_LEDGERS` (default `120`, about ten minutes at five seconds a ledger) is where `/ready` flips from 200 to 503. A free-tier demo can tolerate a much larger window than production, so tune it per deployment. `GET /ready` echoes it as `checks.maxLagLedgers`.
+
+`READY_WEBHOOK_MAX_AGE_MS` (default `900000`, fifteen minutes) is the same idea for the webhook outbox: a delivery that has been pending longer than that makes `/ready` answer 503 with `checks.webhooks.state: "backlog"`. Every retry of a reachable endpoint resolves inside the backoff ceiling (six attempts within a few minutes), so an older row means the delivery loop is not draining, not that a clinic's endpoint is slow. With `WEBHOOK_URLS` unset the check reports `state: "disabled"` and never degrades.
 
 `SOROBAN_RPC_URLS` is the failover list. Set it to two endpoints and an outage at the first one costs a few failed reads rather than an indexing stall; with one endpoint (or only `SOROBAN_RPC_URL` set) the behaviour is exactly as before. `GET /version` reports every configured endpoint and `GET /ready` reports the active one, both with any credentials redacted.
 
@@ -764,8 +778,11 @@ A new, empty database needs nothing special.
 
 ## Operations
 
-- **Metrics**: `GET /metrics` is Prometheus text (not rate limited). `ops/grafana-dashboard.json` is a ready-made Grafana dashboard (import it, pick your Prometheus datasource) with panels for request rate, latency, error rate, indexer lag, seconds since the last successful poll and events applied/skipped; a test keeps it in sync with `src/lib/metrics.ts`. Alert on `indexer_lag_ledgers` and `indexer_seconds_since_success`; both are set by the process running the indexer. `stream_connections` is the number of `GET /stream` clients this process is holding, so `rate-limited`-looking `503 stream_full` responses can be seen before they happen; it only moves in the process that serves the streams (combined mode, or the API in a split deployment).
+- **Metrics**: `GET /metrics` is Prometheus text (not rate limited). `ops/grafana-dashboard.json` is a ready-made Grafana dashboard (import it, pick your Prometheus datasource) with panels for request rate, latency, error rate, indexer lag, seconds since the last successful poll, events applied/skipped and the webhook backlog; a test keeps it in sync with `src/lib/metrics.ts`. Alert on `indexer_lag_ledgers` and `indexer_seconds_since_success`; both are set by the process running the indexer. `stream_connections` is the number of `GET /stream` clients this process is holding, so `rate-limited`-looking `503 stream_full` responses can be seen before they happen; it only moves in the process that serves the streams (combined mode, or the API in a split deployment). `webhook_deliveries_pending` and `webhook_deliveries_abandoned` are the outbox backlog, refreshed by the process running the delivery loop, and are the series `/ready` reports as `checks.webhooks`.
+- **Alerts**: `ops/alerts.yml` holds the Prometheus rules that should page someone — indexer lag past `READY_MAX_LAG_LEDGERS`, an indexer that has not completed a poll in five minutes, failed projections, a 5xx rate above 5%, and a webhook backlog that never drains. Load it with `rule_files:` in Prometheus (or as a `PrometheusRule`); CI validates it with `promtool check rules` in the `alerts` job, and `src/__tests__/alerts.test.ts` fails if a rule references a metric the service does not serve. Thresholds and what each alert means are commented in the file.
+- **Logs**: Render's log explorer keeps a short window, so incident forensics need a stream to somewhere searchable. See [docs/logging.md](docs/logging.md) for the fields worth indexing, the Better Stack and Axiom recipes, and an end-to-end check that one request is one line.
 - **Tracing**: with `OTEL_EXPORTER_OTLP_ENDPOINT` set, the OpenTelemetry SDK starts and emits spans for HTTP routes, Prisma queries, Soroban RPC calls and indexer cycles; unset means no tracing at all. See [Tracing (OpenTelemetry)](#tracing-opentelemetry).
+- **Dependency review**: `.github/workflows/dependency-review.yml` reviews the dependencies a pull request adds or bumps and fails it on a high or critical advisory. It complements the `audit` job, which runs `npm audit --omit=dev` over the whole lockfile; this one only looks at the diff, so a bad package is caught in the pull request that introduces it.
 - **Failed events**: an event the indexer cannot project is stored in the `FailedEvent` table and `/ready` reports degraded until it is cleared. After fixing the cause, run `npm run indexer:retry-failed`; it exits non-zero while any event still fails.
 - **Reconciliation**: the read model is a cache of the chain, so run `npm run indexer:reconcile` on a schedule. It reads `get_voucher` for every non-terminal voucher (plus a rolling sample of settled ones, `--sample`, default 25) and records each disagreement in `ReconcileMismatch`. `/ready` reports `checks.reconcileMismatches` and `checks.reconcile: "drift"`, but stays 200: unlike a failed event, drift says nothing about whether this instance can serve traffic. `--fix` rewrites the differing rows from chain state, which is the only safe direction. The command exits non-zero while any mismatch is open.
 - **Faucet usage**: with `FAUCET_CONTRACT_ID` set, `dripped` events are indexed into `FaucetDrip` and `/stats` reports `faucetDrips` (total) and `faucetWallets` (distinct wallets) — the closest thing to a count of people who tried the demo.

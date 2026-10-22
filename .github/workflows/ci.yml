@@ -145,6 +145,22 @@ jobs:
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
 
+  # Alerting rules are configuration, so they are validated rather than
+  # trusted: promtool is the parser Prometheus loads them with, and it fails
+  # on a malformed expression, a bad duration or an unknown field. It runs
+  # from the pinned Prometheus image so there is no download URL to rot.
+  alerts:
+    name: alerts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate ops/alerts.yml
+        run: |
+          docker run --rm \
+            -v "$PWD/ops:/ops:ro" \
+            --entrypoint promtool \
+            prom/prometheus:v3.1.0 check rules /ops/alerts.yml
+
   bot:
     name: auto-merge bot tests
     runs-on: ubuntu-latest

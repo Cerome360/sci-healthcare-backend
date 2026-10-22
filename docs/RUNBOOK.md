@@ -225,6 +225,52 @@ deleted as soon as a run sees the voucher agree.
    it points at a wrong `VOUCHER_CONTRACT_ID` or a database restored from
    another network, which deleting rows would only hide.
 
+## Webhook deliveries are stuck
+
+Webhooks are optional (`WEBHOOK_URLS`), and the outbox is separate from the
+indexer on purpose: a slow clinic endpoint must never stall the cursor. The
+cost is that a broken delivery path does not fail anything else — the
+indexer keeps indexing and the API keeps serving while clinics stop being
+told about voucher events. `/ready` is what makes that visible.
+
+### Symptoms
+
+- `/ready` returns 503 with `checks.webhooks.state = "backlog"` and
+  `oldestPendingAgeSeconds` beyond `maxPendingAgeSeconds`
+  (`READY_WEBHOOK_MAX_AGE_MS`, 15 minutes by default).
+- `checks.webhooks.abandoned` above zero: those deliveries were given up on
+  and will never be retried.
+- The `SciWebhookBacklog` alert (`ops/alerts.yml`) fires when
+  `webhook_deliveries_pending` has stayed above zero for fifteen minutes;
+  `SciWebhookDeliveriesAbandoned` fires on the abandoned count.
+
+### What to do
+
+1. **Is the delivery loop running?** It runs in the process that starts the
+   dispatcher (combined mode, or the API process in a split deployment);
+   look for `webhook delivery started` at boot and a recent
+   `webhook delivery cycle failed` if it is erroring. A process with no such
+   line at all has webhooks disabled — check `WEBHOOK_URLS` and
+   `WEBHOOK_SECRET`.
+2. **Is it the endpoint?** The log line `webhook delivery failed` carries
+   `url`, `attempts`, `error` and `abandoned`. `HTTP 5xx`, `408` and `429`
+   are retried; any other 4xx is permanent and abandons the delivery
+   immediately. Fix the receiver, not this service: there is no way to make
+   a clinic's endpoint accept a payload.
+3. **Nothing is stuck, but the count is old.** Rows that were delivered or
+   abandoned never disappear, and only pending rows affect `/ready`. If a
+   backlog was cleared by hand and the gauge has not moved yet, wait one
+   delivery interval (the loop scans the outbox every five seconds).
+4. **Recovering a missed notification.** The events are still on chain and
+   in `GET /vouchers/:id/events`; a receiver that comes back up should be
+   pointed at the API, not replayed from the log. `txHash` and `ledger` in
+   the failed line identify exactly what was missed.
+
+Disabling webhooks (`WEBHOOK_URLS` empty) makes `/ready` report
+`checks.webhooks.state = "disabled"` and stop degrading, which is what you
+want only if you have decided those notifications are not being delivered at
+all. Pending rows from before are then never drained.
+
 ## Uptime monitoring
 
 Two layers watch the deployed service, and they answer different questions:
@@ -233,6 +279,7 @@ Two layers watch the deployed service, and they answer different questions:
 | --- | --- | --- |
 | The `Uptime monitor` GitHub workflow (committed in this repo) | `/ready` every 30 minutes | A failed run and a red README badge |
 | An external monitor (UptimeRobot below) | `/ready` every 5 minutes | Email to the alert contact |
+| Prometheus rules in `ops/alerts.yml` | `/metrics` series | Indexer lag or stall, failed events, 5xx rate, webhook backlog |
 
 Neither of these can see the service get *slow*; they only prove `/ready`
 stays green. A paging on latency would need response-time alerting, which
@@ -280,8 +327,9 @@ alerts, which is all this needs:
 API whose indexer silently stopped advancing, whose database has gone away,
 or whose RPC is unreachable still returns `200` on `/health`. `/ready` runs
 the real dependency checks — database, RPC, indexer lag against
-`READY_MAX_LAG_LEDGERS`, retention gap — and returns **503** with the
-failing check named. A 503 from this endpoint is a real alert, not a
+`READY_MAX_LAG_LEDGERS`, retention gap, failed events, webhook backlog
+against `READY_WEBHOOK_MAX_AGE_MS` — and returns **503** with the failing
+check named. A 503 from this endpoint is a real alert, not a
 transient failure to filter out.
 
 ### Cold-start false positives on Render's free tier

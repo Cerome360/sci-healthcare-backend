@@ -42,7 +42,7 @@
         "tags": [
           "health"
         ],
-        "description": "Reports indexer lag, RPC retention gaps, and database connectivity.",
+        "description": "Reports indexer lag, RPC retention gaps, database connectivity, failed events and the webhook outbox backlog.",
         "responses": {
           "200": {
             "description": "Default Response"
@@ -496,7 +496,7 @@
         "tags": [
           "health"
         ],
-        "description": "Reports indexer lag, RPC retention gaps, and database connectivity.",
+        "description": "Reports indexer lag, RPC retention gaps, database connectivity, failed events and the webhook outbox backlog.",
         "responses": {
           "200": {
             "description": "Default Response"

@@ -1,0 +1,134 @@
+# Prometheus alerting rules for the API and the indexer.
+#
+# Metrics come from `GET /metrics` (src/lib/metrics.ts), so the expressions
+# below only reference series this service serves. Thresholds match the
+# documented degradation points rather than being invented here:
+#
+#   - indexer lag       READY_MAX_LAG_LEDGERS (default 120, /ready goes 503)
+#   - stalled indexer   a five-second poll loop that has not succeeded in
+#                       five minutes is not slow, it is stuck
+#   - failed events     any event the indexer recorded in FailedEvent
+#   - 5xx rate          5% of requests failing for ten minutes
+#   - webhook backlog   pending deliveries that never drain (see #130)
+#
+# The indexer series are populated by the process running the indexer
+# (combined mode, or the worker); the webhook series by the process running
+# the delivery loop. In a split deployment scrape both.
+#
+# Validate after any edit with:
+#
+#   promtool check rules ops/alerts.yml
+#
+# CI runs exactly that (the `alerts` job in .github/workflows/ci.yml).
+
+groups:
+  - name: sci-healthcare-indexer
+    rules:
+      - alert: SciIndexerLagging
+        # The same ledger gap at which GET /ready answers 503. Ten minutes
+        # of it, because a single slow cycle catches up on its own.
+        expr: indexer_lag_ledgers > 120
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Indexer is more than 120 ledgers behind the chain tip
+          description: >-
+            The cursor in IndexerState trails the Soroban RPC tip by
+            {{ $value }} ledgers, past READY_MAX_LAG_LEDGERS, so /ready is
+            degraded. Check checks.rpcUrl on /ready and the RPC failover
+            lines in the log; if the cursor is older than the RPC retention
+            window, follow "Indexer falls outside the RPC retention window"
+            in docs/RUNBOOK.md.
+
+      - alert: SciIndexerStalled
+        # Every poll records a success timestamp, so nothing for five
+        # minutes means the loop is not running or cannot reach the
+        # database, not that it is behind.
+        expr: indexer_seconds_since_success > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Indexer has not completed a poll in five minutes
+          description: >-
+            indexer_seconds_since_success is {{ $value }}s. The poll loop
+            runs every INDEXER_POLL_MS (5s by default) and backs off at most
+            INDEXER_BACKOFF_MAX_MS, so this is an outage: check the process
+            is up, the database is reachable, and the log for
+            "indexer poll failed". No events are lost meanwhile — the cursor
+            only advances after a batch commits.
+
+      - alert: SciFailedEvents
+        # FailedEvent rows are unprojected events: data the read model knows
+        # it is missing. /ready stays degraded until they are retried.
+        expr: increase(events_skipped_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Contract events are failing to project
+          description: >-
+            {{ $value }} event(s) per second were recorded as FailedEvent in
+            the last ten minutes. Find the event name and transaction hash in
+            the "event failed" log line, fix the decoder in
+            src/stellar/events.ts if it is a decoding bug, then run
+            npm run indexer:retry-failed.
+
+  - name: sci-healthcare-api
+    rules:
+      - alert: SciHigh5xxRate
+        # A share rather than a count: a burst of traffic is not an incident,
+        # and a low-traffic instance only needs a handful of 5xx to matter.
+        expr: |
+          sum(rate(http_requests_total{status_code=~"5.."}[5m]))
+            /
+          sum(rate(http_requests_total[5m]))
+            > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: More than 5% of API requests are returning 5xx
+          description: >-
+            {{ $value | humanizePercentage }} of requests failed with a 5xx
+            over the last ten minutes. The response body is always
+            internal_error; the cause is in the log line for the same reqId.
+            Check /ready for a failing database or RPC check first.
+
+      - alert: SciWebhookBacklog
+        # Pending deliveries drain within seconds when the loop is healthy:
+        # retries are 5s doubling to a 10 minute ceiling, so a row that is
+        # still pending after fifteen minutes means the loop is not running
+        # (or not committing). This is the same condition /ready reports as
+        # checks.webhooks.state = "backlog" once past
+        # READY_WEBHOOK_MAX_AGE_MS.
+        expr: webhook_deliveries_pending > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Webhook deliveries are not draining
+          description: >-
+            {{ $value }} delivery row(s) have been pending in the outbox for
+            more than fifteen minutes. Clinics are not being told about
+            voucher events. Check the webhook delivery loop is running and
+            the log for "webhook delivery failed" and "webhook delivery
+            cycle failed"; a receiver that is slow or unreachable is retried
+            with backoff, so a backlog means the loop, not the endpoint.
+
+      - alert: SciWebhookDeliveriesAbandoned
+        # Abandoned rows are never retried: that receiver missed those
+        # events for good, so the count staying above zero needs a human.
+        expr: webhook_deliveries_abandoned > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Webhook deliveries have been given up on
+          description: >-
+            {{ $value }} delivery row(s) are marked abandoned: six failed
+            attempts, or a permanent 4xx response from the endpoint. Those
+            events were never delivered. Check the endpoint and the
+            "webhook delivery failed" lines for the lastError, then replay
+            the affected vouchers from the log after the receiver is fixed.

@@ -2,8 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
-import { env } from '../env.js';
+import { env, WEBHOOKS_ENABLED } from '../env.js';
 import { isPostgres } from '../lib/database.js';
+import { webhookBacklog } from '../lib/webhooks.js';
 import { APP_VERSION, deployedCommit, STARTED_AT } from '../lib/version.js';
 import { server } from '../stellar/client.js';
 
@@ -152,7 +153,9 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
     schema: {
       tags: ['health'],
       summary: 'Readiness check',
-      description: 'Reports indexer lag, RPC retention gaps, and database connectivity.',
+      description:
+        'Reports indexer lag, RPC retention gaps, database connectivity, failed ' +
+        'events and the webhook outbox backlog.',
     },
   }, async (_req, reply) => {
     const checks: Record<string, unknown> = {};
@@ -174,6 +177,27 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
       const reconcileMismatches = await prisma.reconcileMismatch.count();
       checks.reconcileMismatches = reconcileMismatches;
       checks.reconcile = reconcileMismatches > 0 ? 'drift' : 'ok';
+
+      // Failed or stuck webhook deliveries pile up in the outbox without
+      // failing anything else: the indexer keeps indexing and the API keeps
+      // serving while clinics stop being notified. A delivery older than
+      // `READY_WEBHOOK_MAX_AGE_MS` cannot be normal retry traffic — every
+      // attempt resolves inside the backoff ceiling — so it is degraded.
+      const backlog = await webhookBacklog();
+      const webhookState = !WEBHOOKS_ENABLED
+        ? 'disabled'
+        : backlog.stale > 0
+          ? 'backlog'
+          : 'ok';
+      checks.webhooks = {
+        state: webhookState,
+        enabled: WEBHOOKS_ENABLED,
+        pending: backlog.pending,
+        abandoned: backlog.abandoned,
+        oldestPendingAgeSeconds: backlog.oldestPendingAgeSeconds,
+        maxPendingAgeSeconds: env.READY_WEBHOOK_MAX_AGE_MS / 1000,
+      };
+      if (webhookState === 'backlog') healthy = false;
     } catch (err) {
       healthy = false;
       checks.database = `error: ${(err as Error).message}`;

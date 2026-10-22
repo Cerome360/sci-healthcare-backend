@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -604,6 +605,29 @@ describe('GET /version', () => {
 describe('GET /ready', () => {
   afterEach(() => vi.restoreAllMocks());
 
+  // Webhook rows are not part of the per-test reset above, and another suite
+  // may leave some behind (every test file shares one database).
+  beforeEach(async () => {
+    await prisma.webhookDelivery.deleteMany();
+  });
+
+  /** One queued delivery, aged by `ageMs` so the backlog threshold is testable. */
+  async function queueDelivery(ageMs = 0) {
+    await prisma.webhookDelivery.create({
+      data: {
+        id: randomUUID(),
+        url: 'https://clinic.example.test/webhooks',
+        event: 'voucher_settled',
+        voucherId: '1',
+        status: 'Settled',
+        ledger: 1,
+        payload: '{}',
+        nextAttemptAt: new Date(),
+        createdAt: new Date(Date.now() - ageMs),
+      },
+    });
+  }
+
   async function seedCursor(lastLedger: number) {
     await prisma.indexerState.upsert({
       where: { id: 1 },
@@ -656,6 +680,66 @@ describe('GET /ready', () => {
     } finally {
       await prisma.reconcileMismatch.deleteMany();
     }
+  });
+
+  it('reports a fresh webhook backlog without degrading (#130)', async () => {
+    await seedCursor(1000);
+    vi.spyOn(server, 'getLatestLedger').mockResolvedValue({ sequence: 1000 } as never);
+    await queueDelivery();
+
+    const { status, body } = await get('/ready');
+    // A delivery that is merely queued says nothing about this instance:
+    // the loop runs every few seconds and retries inside the backoff ceiling.
+    expect(status).toBe(200);
+    expect(body.checks.webhooks).toMatchObject({
+      state: 'ok',
+      enabled: true,
+      pending: 1,
+      abandoned: 0,
+      oldestPendingAgeSeconds: 0,
+      maxPendingAgeSeconds: env.READY_WEBHOOK_MAX_AGE_MS / 1000,
+    });
+  });
+
+  it('degrades when a delivery has been pending past the threshold (#130)', async () => {
+    await seedCursor(1000);
+    vi.spyOn(server, 'getLatestLedger').mockResolvedValue({ sequence: 1000 } as never);
+    const maxAgeSeconds = env.READY_WEBHOOK_MAX_AGE_MS / 1000;
+    await queueDelivery((maxAgeSeconds + 60) * 1000);
+
+    const { status, body } = await get('/ready');
+    expect(status).toBe(503);
+    expect(body.status).toBe('degraded');
+    expect(body.checks.webhooks.state).toBe('backlog');
+    expect(body.checks.webhooks.pending).toBe(1);
+    expect(body.checks.webhooks.oldestPendingAgeSeconds).toBeGreaterThanOrEqual(maxAgeSeconds);
+  });
+
+  it('counts abandoned deliveries separately from the pending backlog (#130)', async () => {
+    await seedCursor(1000);
+    vi.spyOn(server, 'getLatestLedger').mockResolvedValue({ sequence: 1000 } as never);
+    await prisma.webhookDelivery.create({
+      data: {
+        id: randomUUID(),
+        url: 'https://clinic.example.test/webhooks',
+        event: 'voucher_settled',
+        voucherId: '1',
+        status: 'Settled',
+        ledger: 1,
+        payload: '{}',
+        nextAttemptAt: new Date(),
+        attempts: 6,
+        abandonedAt: new Date(),
+        lastError: 'HTTP 500',
+      },
+    });
+
+    const { status, body } = await get('/ready');
+    // An abandoned delivery is already counted where it matters; it is not
+    // pending, so it does not change readiness on its own.
+    expect(status).toBe(200);
+    expect(body.checks.webhooks).toMatchObject({ state: 'ok', pending: 0, abandoned: 1 });
+    expect(body.checks.webhooks.oldestPendingAgeSeconds).toBeNull();
   });
 
   it('is degraded one ledger past the threshold', async () => {

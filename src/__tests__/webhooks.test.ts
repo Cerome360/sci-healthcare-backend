@@ -3,10 +3,12 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { prisma } from '../db.js';
 import { env, WEBHOOK_URLS } from '../env.js';
+import { registry } from '../lib/metrics.js';
 import {
   backoffMs,
   enqueueWebhook,
   signWebhook,
+  webhookBacklog,
   WEBHOOK_BASE_BACKOFF_MS,
   WEBHOOK_DELIVERY_INTERVAL_MS,
   WEBHOOK_MAX_BACKOFF_MS,
@@ -80,6 +82,49 @@ describe('webhook payload and signature', () => {
     expect(backoffMs(2)).toBe(WEBHOOK_BASE_BACKOFF_MS * 2);
     expect(backoffMs(3)).toBe(WEBHOOK_BASE_BACKOFF_MS * 4);
     expect(backoffMs(99)).toBe(WEBHOOK_MAX_BACKOFF_MS);
+  });
+});
+
+describe('webhook backlog (#130)', () => {
+  it('counts pending, stale and abandoned rows and publishes the gauges', async () => {
+    const staleAgeMs = env.READY_WEBHOOK_MAX_AGE_MS + 60_000;
+    const row = (id: string, extra: object = {}) => ({
+      id,
+      url: 'https://clinic.example/hooks',
+      event: 'voucher_settled',
+      voucherId: '1',
+      status: 'Settled',
+      ledger: 1,
+      payload: '{}',
+      nextAttemptAt: new Date(),
+      ...extra,
+    });
+
+    await prisma.webhookDelivery.createMany({
+      data: [
+        row('pending-fresh'),
+        row('pending-stale', { createdAt: new Date(Date.now() - staleAgeMs) }),
+        row('abandoned', { attempts: 6, abandonedAt: new Date(), lastError: 'HTTP 500' }),
+        row('delivered', { attempts: 1, deliveredAt: new Date() }),
+      ],
+    });
+
+    const backlog = await webhookBacklog();
+    expect(backlog).toMatchObject({ pending: 2, stale: 1, abandoned: 1 });
+    expect(backlog.oldestPendingAgeSeconds).toBeGreaterThanOrEqual(
+      env.READY_WEBHOOK_MAX_AGE_MS / 1000,
+    );
+
+    // The same numbers `/ready` reports, so a Prometheus alert can watch the
+    // backlog without scraping the readiness route.
+    const metrics = await registry.metrics();
+    expect(metrics).toContain('webhook_deliveries_pending 2');
+    expect(metrics).toContain('webhook_deliveries_abandoned 1');
+  });
+
+  it('reports an empty outbox honestly rather than a zero age', async () => {
+    const backlog = await webhookBacklog();
+    expect(backlog).toEqual({ pending: 0, stale: 0, abandoned: 0, oldestPendingAgeSeconds: null });
   });
 });
 

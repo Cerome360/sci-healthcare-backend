@@ -1,0 +1,35 @@
+name: Dependency review
+
+# Reviews the dependencies a pull request adds, bumps or removes, before it
+# is merged: known vulnerabilities from the GitHub Advisory Database, with
+# high and critical severities failing the job.
+#
+# This complements the `audit` job in ci.yml rather than replacing it. That
+# job runs `npm audit --omit=dev` over the whole lockfile — what actually
+# ships. This one reviews the diff, i.e. only the dependencies the pull
+# request is asking to add, so a bad package is caught in the pull request
+# that introduces it, where reverting is cheap.
+#
+# Dependency review is available on public repositories without GitHub
+# Advanced Security. A test in src/__tests__/ci-workflows.test.ts keeps the
+# trigger, the action and the failure threshold below in place.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: dependency-review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@v4
+        with:
+          # High and critical advisories block the merge; moderate and low
+          # findings are reported in the job summary but do not fail it.
+          fail-on-severity: high

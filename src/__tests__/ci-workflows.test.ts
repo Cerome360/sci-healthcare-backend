@@ -36,6 +36,37 @@ describe('codeql.yml', () => {
   });
 });
 
+describe('dependency-review.yml', () => {
+  const yml = workflow('dependency-review.yml');
+
+  it('runs on pull requests into main (#127)', () => {
+    expect(yml).toMatch(/^on:/m);
+    expect(yml).toMatch(/^ {2}pull_request:/m);
+    expect(yml).toMatch(/^ {4}branches: \[main\]$/m);
+  });
+
+  it('uses the dependency review action and fails on high severity (#127)', () => {
+    expect(yml).toMatch(/actions\/dependency-review-action@v\d+/);
+    expect(yml).toMatch(/fail-on-severity: high/);
+  });
+
+  it('asks for no write permission it does not need', () => {
+    expect(yml).toMatch(/contents: read/);
+    expect(yml).not.toMatch(/write/);
+  });
+});
+
+describe('ci.yml', () => {
+  const yml = workflow('ci.yml');
+
+  it('validates the alerting rules with promtool (#131)', () => {
+    expect(yml).toMatch(/^ {2}alerts:/m);
+    expect(yml).toMatch(/promtool/);
+    // The file is mounted into the Prometheus image at /ops.
+    expect(yml).toMatch(/check rules \/ops\/alerts\.yml/);
+  });
+});
+
 describe('monitor.yml', () => {
   const yml = workflow('monitor.yml');
 
