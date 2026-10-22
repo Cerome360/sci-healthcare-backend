@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
-    "node": ">=20.11"
+    "node": ">=20.12"
   },
   "workspaces": [
     "packages/*"
@@ -35,9 +35,6 @@
     "db:seed": "prisma db seed",
     "loadtest": "node scripts/loadtest.mjs",
     "prepare": "husky"
-  },
-  "prisma": {
-    "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
     "@fastify/compress": "9.2.2",
