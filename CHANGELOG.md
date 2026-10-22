@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **Grafana dashboard for the API and indexer** (#132): `ops/grafana-dashboard.json` imports into any Grafana (Prometheus datasource chosen at import) with panels for request rate and 5xx error rate by route, request latency p50/p95/p99 from `http_request_duration_seconds`, requests by status code, open SSE streams, indexer lag and seconds-since-last-successful-poll, and events applied / skipped by event name — every metric `src/lib/metrics.ts` exposes, and nothing it does not. Thresholds match the documented degradation points (`READY_MAX_LAG_LEDGERS` 120, `SSE_MAX_CONNECTIONS` 64). `src/__tests__/grafana-dashboard.test.ts` keeps the dashboard in lockstep with `metrics.ts`: it fails when a metric is renamed or removed without updating the dashboard, and when a dashboard query references a metric the service does not serve.
 - **GET /providers/:address/stats**: A clinic's vouchers grouped by status, with the total settled value summed exactly (base-unit strings). 404 for an unknown provider.
 - **GET /stats/daily?days=30**: Funded, settled and refunded counts and value per UTC day (max 365). Days with no activity are returned as zeros, and amounts are summed with BigInt.
 - **Voucher.refundedAt** (nullable): set from the `voucher_refunded` event's ledger close time. `prisma db push` adds the column in place (no backfill needed).
