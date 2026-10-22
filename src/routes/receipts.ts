@@ -257,6 +257,44 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /**
+   * Proof for a receipt on chain.
+   *
+   * To prove a receipt on chain, a third party needs the transaction hash,
+   * ledger and event id, which the receipt route does not return.
+   *
+   * Acceptance criteria:
+   * - Proof fields returned: tx hash, ledger, event id and contract id
+   * - 404 when unknown
+   */
+  app.get('/receipts/:voucherId/proof', async (req) => {
+    const parsed = voucherIdParam.safeParse(req.params);
+    if (!parsed.success) {
+      throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
+    }
+    const { voucherId } = parsed.data;
+
+    const receipt = await prisma.receipt.findUnique({
+      where: { voucherId },
+    });
+    if (!receipt) throw new ApiError(404, 'receipt_not_found', 'Receipt not found');
+
+    const events = await prisma.contractEvent.findMany({
+      where: { voucherId },
+      orderBy: [{ ledger: 'asc' }, { id: 'asc' }],
+    });
+
+    if (events.length === 0) throw new ApiError(404, 'receipt_not_found', 'Receipt not found');
+
+    const proofEvent = events[events.length - 1];
+    return {
+      txHash: proofEvent!.txHash,
+      ledger: proofEvent!.ledger,
+      eventId: proofEvent!.id,
+      contractId: proofEvent!.contractId,
+    };
+  });
+
+  /**
    * Single receipt by voucher ID.
    *
    * Used for shareable receipt pages and verification. No beneficiary

@@ -1721,6 +1721,25 @@ describe('GET /receipts/:voucherId', () => {
     expect(status).toBe(404);
     expect(body.error).toBe('receipt_not_found');
   });
+
+  describe('GET /receipts/:voucherId/proof', () => {
+    it('returns proof fields from the event log', async () => {
+      const { status, body } = await get('/receipts/1/proof');
+      expect(status).toBe(200);
+      expect(body).toMatchObject({
+        txHash: 'f'.repeat(64),
+        ledger: 22,
+        eventId: 'ce-2',
+        contractId: VOUCHER,
+      });
+    });
+
+    it('404s for an unknown voucher', async () => {
+      const { status, body } = await get('/receipts/999/proof');
+      expect(status).toBe(404);
+      expect(body.error).toBe('receipt_not_found');
+    });
+  });
 });
 
 describe('GET /vouchers', () => {
