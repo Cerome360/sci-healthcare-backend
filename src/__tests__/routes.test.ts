@@ -733,6 +733,34 @@ describe('GET /providers', () => {
 });
 
 describe('GET /providers/:address/stats', () => {
+  /** Timestamp offsets in seconds from the same creation time. */
+  async function seedTimings(rows: {
+    claimedAtSeconds: number | null;
+    attestedAtSeconds: number | null;
+    providerAddress?: string;
+    status?: string;
+  }[]) {
+    const createdAt = new Date('2026-10-01T00:00:00Z');
+    const at = (seconds: number | null) => seconds === null
+      ? null
+      : new Date(createdAt.getTime() + seconds * 1000);
+    await prisma.voucher.createMany({
+      data: rows.map((row, i) => ({
+        id: `timing-${i}`,
+        funder: FUNDER,
+        beneficiaryRef: REF,
+        providerAddress: row.providerAddress ?? CLINIC,
+        serviceCode: 101,
+        amount: '30000000',
+        status: row.status ?? 'Attested',
+        createdAt,
+        expiresAt: new Date(createdAt.getTime() + DAY),
+        claimedAt: at(row.claimedAtSeconds),
+        attestedAt: at(row.attestedAtSeconds),
+      })),
+    });
+  }
+
   it('returns counts by voucher status and the total settled value', async () => {
     const { status, body } = await get(`/providers/${CLINIC}/stats`);
     expect(status).toBe(200);
@@ -752,6 +780,9 @@ describe('GET /providers/:address/stats', () => {
       settledVouchers: 1,
       settledValue: '30000000',
       settledValueDisplay: '3.0000000',
+      // Existing vouchers lack claimedAt, including one with attestedAt.
+      medianClaimSeconds: null,
+      medianAttestationSeconds: null,
     });
   });
 
@@ -763,6 +794,8 @@ describe('GET /providers/:address/stats', () => {
       settledVouchers: 0,
       settledValue: '0',
       settledValueDisplay: '0.0000000',
+      medianClaimSeconds: null,
+      medianAttestationSeconds: null,
       byStatus: { Funded: 0, Claimed: 0, Attested: 0, Settled: 0, Disputed: 0, Refunded: 0 },
     });
   });
@@ -785,6 +818,115 @@ describe('GET /providers/:address/stats', () => {
     const { body } = await get(`/providers/${CLINIC}/stats`);
     expect(body.settledVouchers).toBe(2);
     expect(body.settledValue).toBe((30000000n + 9007199254740993n).toString());
+  });
+
+  it('takes numeric odd-count medians, including vouchers in later lifecycle states', async () => {
+    await seedTimings([
+      { claimedAtSeconds: 30, attestedAtSeconds: 33, status: 'Settled' },
+      { claimedAtSeconds: 2, attestedAtSeconds: 22, status: 'Disputed' },
+      { claimedAtSeconds: 10, attestedAtSeconds: 110, status: 'Refunded' },
+    ]);
+
+    const { status, body } = await get(`/providers/${CLINIC}/stats`);
+    expect(status).toBe(200);
+    expect(body.medianClaimSeconds).toBe(10);
+    // Claim-to-attestation durations are 3, 20 and 100, not creation-to-attestation.
+    expect(body.medianAttestationSeconds).toBe(20);
+  });
+
+  it('averages the middle two of even samples without rounding', async () => {
+    await seedTimings([
+      { claimedAtSeconds: 20, attestedAtSeconds: 22 },
+      { claimedAtSeconds: 1, attestedAtSeconds: 4 },
+      { claimedAtSeconds: 100, attestedAtSeconds: 300 },
+      { claimedAtSeconds: 2, attestedAtSeconds: 32 },
+    ]);
+
+    const { body } = await get(`/providers/${CLINIC}/stats`);
+    expect(body.medianClaimSeconds).toBe(11); // (2 + 20) / 2
+    expect(body.medianAttestationSeconds).toBe(16.5); // (3 + 30) / 2
+  });
+
+  it('uses only complete observations for each stage independently', async () => {
+    await seedTimings([
+      { claimedAtSeconds: 20, attestedAtSeconds: null, status: 'Claimed' },
+      { claimedAtSeconds: 4, attestedAtSeconds: 14 },
+      { claimedAtSeconds: null, attestedAtSeconds: 1000 },
+      { claimedAtSeconds: null, attestedAtSeconds: null, status: 'Funded' },
+    ]);
+
+    const { body } = await get(`/providers/${CLINIC}/stats`);
+    expect(body.medianClaimSeconds).toBe(12);
+    expect(body.medianAttestationSeconds).toBe(10);
+  });
+
+  it('returns a claim median but null attestation time before any complete attestation', async () => {
+    await seedTimings([
+      { claimedAtSeconds: 8, attestedAtSeconds: null, status: 'Claimed' },
+    ]);
+
+    const { body } = await get(`/providers/${CLINIC}/stats`);
+    expect(body.medianClaimSeconds).toBe(8);
+    expect(body.medianAttestationSeconds).toBeNull();
+  });
+
+  it.each([
+    { claimedAtSeconds: 0, attestedAtSeconds: 0, claim: 0, attestation: 0 },
+    { claimedAtSeconds: 0.125, attestedAtSeconds: 0.375, claim: 0.125, attestation: 0.25 },
+  ])('preserves a singleton interval, including zero and fractional seconds: $claim', async (sample) => {
+    await seedTimings([sample]);
+
+    const { body } = await get(`/providers/${CLINIC}/stats`);
+    expect(body.medianClaimSeconds).toBe(sample.claim);
+    expect(body.medianAttestationSeconds).toBe(sample.attestation);
+  });
+
+  it.each([
+    { claimedAtSeconds: -1, attestedAtSeconds: -2, claim: null, attestation: null },
+    { claimedAtSeconds: 10, attestedAtSeconds: 9, claim: 10, attestation: null },
+    { claimedAtSeconds: -1, attestedAtSeconds: 2, claim: null, attestation: 3 },
+  ])('excludes negative intervals independently: $claimedAtSeconds, $attestedAtSeconds', async (sample) => {
+    await seedTimings([sample]);
+
+    const { body } = await get(`/providers/${CLINIC}/stats`);
+    expect(body.medianClaimSeconds).toBe(sample.claim);
+    expect(body.medianAttestationSeconds).toBe(sample.attestation);
+  });
+
+  it('isolates each provider and serves the same metrics through the v1 route', async () => {
+    await seedTimings([
+      { claimedAtSeconds: 6, attestedAtSeconds: 15 },
+      { claimedAtSeconds: 1000, attestedAtSeconds: 5000, providerAddress: SECOND_CLINIC },
+    ]);
+
+    const legacy = await get(`/providers/${CLINIC}/stats`);
+    const versioned = await get(`/v1/providers/${CLINIC}/stats`);
+    expect(versioned.status).toBe(200);
+    expect(versioned.body).toEqual(legacy.body);
+    expect(versioned.body.medianClaimSeconds).toBe(6);
+    expect(versioned.body.medianAttestationSeconds).toBe(9);
+
+    const other = await get(`/providers/${SECOND_CLINIC}/stats`);
+    expect(other.body.medianClaimSeconds).toBe(1000);
+    expect(other.body.medianAttestationSeconds).toBe(4000);
+  });
+
+  it('documents nullable numeric response times and their intervals in OpenAPI', async () => {
+    const { body: spec } = await get('/openapi.json');
+    for (const prefix of ['', '/v1']) {
+      const schema = spec.paths[`${prefix}/providers/{address}/stats`]
+        .get.responses['200'].content['application/json'].schema;
+      for (const field of ['medianClaimSeconds', 'medianAttestationSeconds']) {
+        expect(schema.required).toContain(field);
+        expect(schema.properties[field].anyOf).toEqual([
+          { type: 'number', minimum: 0 },
+          { type: 'null' },
+        ]);
+        expect(schema.properties[field].description).toContain('seconds');
+      }
+      expect(schema.properties.medianClaimSeconds.description).toContain('claimedAt - createdAt');
+      expect(schema.properties.medianAttestationSeconds.description).toContain('attestedAt - claimedAt');
+    }
   });
 
   it('404s an unknown provider', async () => {

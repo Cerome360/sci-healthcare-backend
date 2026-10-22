@@ -109,7 +109,7 @@ stays in the log, never in the response.
 | `GET /stats/daily?days=30` | Funded / settled / refunded counts and value per UTC day (`days` 1–365, max 365) |
 | `GET /providers` | Verified clinics, filterable by `status`, `country`, `q` |
 | `GET /providers/:address` | One clinic and its service catalogue |
-| `GET /providers/:address/stats` | A clinic's vouchers by status and its total settled value |
+| `GET /providers/:address/stats` | A clinic's vouchers by status, total settled value, and median claim/attestation times |
 | `GET /providers/:address/history` | Every status transition for a clinic, oldest first |
 | `GET /providers/:address/services/:code/history` | Every observed price for a service, oldest first |
 | `GET /attesters` | Attesters trusted to confirm care; `?all=true` includes removed ones |
@@ -276,6 +276,32 @@ See [`packages/client/README.md`](packages/client/README.md) for installation an
     ]
   }
   ```
+
+- **`GET /v1/providers/:address/stats`**: Voucher counts by status, exact settled value, and clinic response times.
+  ```bash
+  curl http://localhost:8080/v1/providers/GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK/stats
+  ```
+  ```json
+  {
+    "address": "GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK",
+    "name": "Ikeja General Clinic",
+    "status": "Active",
+    "vouchers": 3,
+    "byStatus": { "Funded": 1, "Claimed": 1, "Attested": 0, "Settled": 1, "Disputed": 0, "Refunded": 0 },
+    "settledVouchers": 1,
+    "settledValue": "30000000",
+    "settledValueDisplay": "3.0000000",
+    "medianClaimSeconds": 3600,
+    "medianAttestationSeconds": 7200
+  }
+  ```
+  `medianClaimSeconds` measures `claimedAt - createdAt`;
+  `medianAttestationSeconds` measures `attestedAt - claimedAt`. Both are in
+  seconds and use this clinic's vouchers regardless of their current status.
+  Each median independently excludes missing timestamps and negative intervals,
+  and is `null` when no eligible interval exists. A zero duration is valid;
+  an even sample averages its middle two values without rounding. Unknown
+  providers return `404 provider_not_found`. The unversioned route is an alias.
 
 #### 3. Medical Services Catalog
 - **`GET /v1/services`**: List all medical services offered across active providers.

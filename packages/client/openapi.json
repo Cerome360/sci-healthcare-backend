@@ -63,6 +63,15 @@
         }
       }
     },
+    "/v1/stats/daily": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/v1/providers": {
       "get": {
         "responses": {
@@ -87,6 +96,128 @@
         "responses": {
           "200": {
             "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/v1/providers/{address}/stats": {
+      "get": {
+        "summary": "Clinic throughput and response times",
+        "tags": [
+          "providers"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "address",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "vouchers": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "byStatus": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "settledVouchers": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "settledValue": {
+                      "type": "string",
+                      "description": "Total settled amount as a base-unit decimal string."
+                    },
+                    "settledValueDisplay": {
+                      "type": "string"
+                    },
+                    "medianClaimSeconds": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Median seconds from voucher creation to claim (claimedAt - createdAt). Only complete, non-negative intervals for this provider are included, regardless of current status. Null when none exist; even sample counts average the middle two without rounding."
+                    },
+                    "medianAttestationSeconds": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Median seconds from claim to attestation (attestedAt - claimedAt). Only complete, non-negative intervals for this provider are included, regardless of current status. Null when none exist; even sample counts average the middle two without rounding."
+                    }
+                  },
+                  "required": [
+                    "address",
+                    "name",
+                    "status",
+                    "vouchers",
+                    "byStatus",
+                    "settledVouchers",
+                    "settledValue",
+                    "settledValueDisplay",
+                    "medianClaimSeconds",
+                    "medianAttestationSeconds"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "provider_not_found"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
           }
         }
       }
@@ -220,6 +351,25 @@
         }
       }
     },
+    "/v1/vouchers/{id}/events": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/v1/receipts": {
       "get": {
         "responses": {
@@ -264,6 +414,34 @@
           "governance"
         ],
         "description": "Who controls each contract, and how that changed.",
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/v1/attesters": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/v1/attesters/{address}": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "address",
+            "required": true
+          }
+        ],
         "responses": {
           "200": {
             "description": "Default Response"
@@ -339,6 +517,15 @@
         }
       }
     },
+    "/stats/daily": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/providers": {
       "get": {
         "responses": {
@@ -363,6 +550,128 @@
         "responses": {
           "200": {
             "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/providers/{address}/stats": {
+      "get": {
+        "summary": "Clinic throughput and response times",
+        "tags": [
+          "providers"
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "address",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "address": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "vouchers": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "byStatus": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "settledVouchers": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "settledValue": {
+                      "type": "string",
+                      "description": "Total settled amount as a base-unit decimal string."
+                    },
+                    "settledValueDisplay": {
+                      "type": "string"
+                    },
+                    "medianClaimSeconds": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Median seconds from voucher creation to claim (claimedAt - createdAt). Only complete, non-negative intervals for this provider are included, regardless of current status. Null when none exist; even sample counts average the middle two without rounding."
+                    },
+                    "medianAttestationSeconds": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "Median seconds from claim to attestation (attestedAt - claimedAt). Only complete, non-negative intervals for this provider are included, regardless of current status. Null when none exist; even sample counts average the middle two without rounding."
+                    }
+                  },
+                  "required": [
+                    "address",
+                    "name",
+                    "status",
+                    "vouchers",
+                    "byStatus",
+                    "settledVouchers",
+                    "settledValue",
+                    "settledValueDisplay",
+                    "medianClaimSeconds",
+                    "medianAttestationSeconds"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Default Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "provider_not_found"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
           }
         }
       }
@@ -496,6 +805,25 @@
         }
       }
     },
+    "/vouchers/{id}/events": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
     "/receipts": {
       "get": {
         "responses": {
@@ -540,6 +868,34 @@
           "governance"
         ],
         "description": "Who controls each contract, and how that changed.",
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/attesters": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Default Response"
+          }
+        }
+      }
+    },
+    "/attesters/{address}": {
+      "get": {
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "in": "path",
+            "name": "address",
+            "required": true
+          }
+        ],
         "responses": {
           "200": {
             "description": "Default Response"

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
@@ -38,6 +39,42 @@ const VOUCHER_STATUSES = [
   'Disputed',
   'Refunded',
 ] as const;
+
+const providerStatsResponse = z.object({
+  address: z.string(),
+  name: z.string(),
+  status: z.string(),
+  vouchers: z.number().int().nonnegative(),
+  byStatus: z.record(z.number().int().nonnegative()),
+  settledVouchers: z.number().int().nonnegative(),
+  settledValue: z.string().describe('Total settled amount as a base-unit decimal string.'),
+  settledValueDisplay: z.string(),
+  medianClaimSeconds: z.number().nonnegative().nullable().describe(
+    'Median seconds from voucher creation to claim (claimedAt - createdAt). ' +
+    'Only complete, non-negative intervals for this provider are included, regardless of current status. ' +
+    'Null when none exist; even sample counts average the middle two without rounding.',
+  ),
+  medianAttestationSeconds: z.number().nonnegative().nullable().describe(
+    'Median seconds from claim to attestation (attestedAt - claimedAt). ' +
+    'Only complete, non-negative intervals for this provider are included, regardless of current status. ' +
+    'Null when none exist; even sample counts average the middle two without rounding.',
+  ),
+});
+
+const providerStatsResponses = {
+  200: providerStatsResponse,
+  404: z.object({ error: z.literal('provider_not_found') }),
+};
+
+/** Numeric median; keep fractional seconds when averaging an even sample. */
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  values.sort((a, b) => a - b);
+  const middle = Math.floor(values.length / 2);
+  return values.length % 2 === 1
+    ? values[middle]!
+    : (values[middle - 1]! + values[middle]!) / 2;
+}
 
 /** Case-insensitive on Postgres; SQLite's LIKE is already case-insensitive for ASCII. */
 function nameContains(q: string): { contains: string; mode?: string } {
@@ -158,13 +195,35 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
 
   /**
    * A clinic's own throughput: how many vouchers it received, in what state,
-   * and the total value it settled.
+   * the total value it settled, and its observed response times.
    *
    * A funder choosing between clinics wants evidence one actually delivers
    * care, and a clinic desk wants its own numbers. Amounts are summed with
    * BigInt and returned as base-unit decimal strings, like everywhere else.
    */
-  app.get('/providers/:address/stats', async (req, reply) => {
+  app.get('/providers/:address/stats', {
+    schema: {
+      tags: ['providers'],
+      summary: 'Clinic throughput and response times',
+      response: providerStatsResponses,
+    },
+    config: {
+      // The global Zod transform targets OpenAPI 3.0, where nullable is a
+      // keyword. This API advertises 3.1, so describe null as a schema type.
+      swaggerTransform: ({ schema, url }) => ({
+        schema: {
+          ...schema,
+          response: Object.fromEntries(Object.entries(providerStatsResponses).map(
+            ([status, response]) => [status, zodToJsonSchema(response, {
+              target: 'jsonSchema7',
+              $refStrategy: 'none',
+            })],
+          )),
+        },
+        url,
+      }),
+    },
+  }, async (req, reply) => {
     const { address } = req.params as { address: string };
     const provider = await prisma.provider.findUnique({
       where: { address },
@@ -172,7 +231,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     });
     if (!provider) return reply.code(404).send({ error: 'provider_not_found' });
 
-    const [grouped, settled] = await Promise.all([
+    const [grouped, settled, timings] = await Promise.all([
       prisma.voucher.groupBy({
         by: ['status'],
         where: { providerAddress: address },
@@ -181,6 +240,10 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       prisma.voucher.findMany({
         where: { providerAddress: address, status: 'Settled' },
         select: { amount: true },
+      }),
+      prisma.voucher.findMany({
+        where: { providerAddress: address, claimedAt: { not: null } },
+        select: { createdAt: true, claimedAt: true, attestedAt: true },
       }),
     ]);
 
@@ -199,6 +262,21 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       .reduce((acc, v) => acc + BigInt(v.amount), 0n)
       .toString();
 
+    // Measure each completed stage independently, including vouchers that
+    // have since settled, been disputed or refunded. A missing timestamp
+    // is not zero; reversed timestamps are not valid response times.
+    const claimSeconds: number[] = [];
+    const attestationSeconds: number[] = [];
+    for (const v of timings) {
+      const claimedAt = v.claimedAt!.getTime(); // guaranteed by the query
+      const claim = (claimedAt - v.createdAt.getTime()) / 1000;
+      if (claim >= 0) claimSeconds.push(claim);
+      if (v.attestedAt !== null) {
+        const attestation = (v.attestedAt.getTime() - claimedAt) / 1000;
+        if (attestation >= 0) attestationSeconds.push(attestation);
+      }
+    }
+
     return {
       address: provider.address,
       name: provider.name,
@@ -208,6 +286,8 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       settledVouchers: settled.length,
       settledValue,
       settledValueDisplay: fromBaseUnits(settledValue),
+      medianClaimSeconds: median(claimSeconds),
+      medianAttestationSeconds: median(attestationSeconds),
     };
   });
 
