@@ -6,6 +6,7 @@ import { fromBaseUnits } from '../lib/amounts.js';
 import { isPostgres } from '../lib/database.js';
 import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
 import { ApiError } from '../lib/errors.js';
+import { applyFields, parseFields } from '../lib/fields.js';
 import { LIST_ROUTE_RATE_LIMIT } from '../lib/rate-limits.js';
 
 const listQuery = z.object({
@@ -15,7 +16,18 @@ const listQuery = z.object({
   cursor: cursorParam,
   limit: limitParam,
   offset: z.coerce.number().int().min(0).default(0),
+  fields: z.string().max(512).optional(),
 });
+
+/** Top-level keys the provider list items emit: the allow-list for `?fields=` (#166). */
+const PROVIDER_FIELDS = [
+  'address',
+  'name',
+  'country',
+  'status',
+  'registeredAt',
+  'services',
+] as const;
 
 /** Every voucher status, in the order the contract moves through them. */
 const VOUCHER_STATUSES = [
@@ -40,7 +52,11 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) {
       throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
     }
-    const { status, country, q, cursor, limit, offset } = parsed.data;
+    const { status, country, q, cursor, limit, offset, fields } = parsed.data;
+
+    const fieldSet = parseFields(fields, PROVIDER_FIELDS, 'GET /providers');
+    const project = <T extends Record<string, unknown>>(rows: T[]): Partial<T>[] =>
+      fieldSet ? rows.map((r) => applyFields(r, fieldSet)) : rows;
 
     const formatProvider = (p: {
       address: string;
@@ -88,7 +104,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
       const page = hasNext ? rows.slice(0, limit) : rows;
       const last = page[page.length - 1];
       const nextCursor = hasNext && last ? encodeCursor(last.registeredAt, last.address) : null;
-      return { limit, nextCursor, providers: page.map(formatProvider) };
+      return { limit, nextCursor, providers: project(page.map(formatProvider)) };
     }
 
     const where = {
@@ -113,7 +129,7 @@ export async function providerRoutes(app: FastifyInstance): Promise<void> {
     const last = page[page.length - 1];
     const nextCursor = hasNext && last ? encodeCursor(last.registeredAt, last.address) : undefined;
 
-    return { total, limit, offset, nextCursor, providers: page.map(formatProvider) };
+    return { total, limit, offset, nextCursor, providers: project(page.map(formatProvider)) };
   });
 
   app.get('/providers/:address', async (req) => {
