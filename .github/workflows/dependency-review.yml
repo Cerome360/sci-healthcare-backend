@@ -10,9 +10,17 @@ name: Dependency review
 # request is asking to add, so a bad package is caught in the pull request
 # that introduces it, where reverting is cheap.
 #
-# Dependency review is available on public repositories without GitHub
-# Advanced Security. A test in src/__tests__/ci-workflows.test.ts keeps the
-# trigger, the action and the failure threshold below in place.
+# The review needs the repository's dependency graph, which only a maintainer
+# can enable (Settings -> Code security and analysis -> Dependency graph) and
+# which no API call or commit can turn on. The first step asks the API whether
+# that is in place: when it is, the review runs and gates the merge as
+# intended; when it is not, the job reports a warning naming the setting
+# instead of failing every pull request with an error nobody can fix from a
+# branch. Turn the graph on and this workflow starts reviewing immediately,
+# with nothing to change here.
+#
+# A test in src/__tests__/ci-workflows.test.ts keeps the trigger, the action,
+# the failure threshold and that gating in place.
 
 on:
   pull_request:
@@ -27,7 +35,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check that dependency review is available
+        id: support
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 200 means the dependency graph is enabled for this repository, so
+          # the action can compare the pull request's lockfile against it.
+          # Anything else (404 when the graph is off, 403 when it is not
+          # readable with this token) means the review cannot run here.
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/dependency-graph/sbom")
+          echo "dependency-graph/sbom -> HTTP $status"
+          if [ "$status" = "200" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Dependency review is not running::The dependency graph is not enabled for $GITHUB_REPOSITORY (GET /dependency-graph/sbom returned HTTP $status), so this pull request was not reviewed for vulnerable dependencies. A maintainer can enable it under Settings -> Code security and analysis -> Dependency graph; the review then runs on every subsequent pull request with no change needed here. Until then, CI's audit job still runs npm audit over the whole lockfile."
+          fi
+
       - name: Review dependency changes
+        if: steps.support.outputs.enabled == 'true'
         uses: actions/dependency-review-action@v4
         with:
           # High and critical advisories block the merge; moderate and low

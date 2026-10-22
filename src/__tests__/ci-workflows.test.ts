@@ -54,6 +54,16 @@ describe('dependency-review.yml', () => {
     expect(yml).toMatch(/contents: read/);
     expect(yml).not.toMatch(/write/);
   });
+
+  it('reviews only when the repository dependency graph can serve a review (#127)', () => {
+    // The action cannot run without the dependency graph, which no commit
+    // can enable. The job checks that first and warns instead of failing
+    // every pull request on a repository where a maintainer has not turned
+    // it on yet.
+    expect(yml).toMatch(/dependency-graph\/sbom/);
+    expect(yml).toMatch(/if: steps\.support\.outputs\.enabled == 'true'/);
+    expect(yml).toMatch(/::warning/);
+  });
 });
 
 describe('ci.yml', () => {
